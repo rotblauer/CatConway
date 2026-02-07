@@ -69,6 +69,24 @@ RUST_LOG=info cargo run --release
 | **5** | Load LWSS (Lightweight Spaceship) |
 | **Escape** | Quit |
 
+## Testing
+
+Run the unit tests (including the lightweight UI/state tests) with:
+
+```bash
+cargo test --all-targets --all-features
+```
+
+## CI and Releases
+
+- GitHub Actions runs the test suite on pushes to `main` and on pull requests.
+- Tagging a commit with `v*` (for example `v0.1.0`) triggers a release workflow that builds and uploads binaries for:
+  - Linux (x86_64-unknown-linux-gnu)
+  - macOS (aarch64-apple-darwin)
+  - Windows (x86_64-pc-windows-msvc)
+
+Release artifacts contain the compiled `catconway` binary packaged per-platform.
+
 ## Architecture
 
 ```
@@ -95,4 +113,3 @@ This implementation treats Conway's Game of Life as a discrete dynamical system:
 - **Toroidal boundary conditions** create a closed system suitable for long-term dynamics study
 - **Methuselah patterns** (R-pentomino, Acorn) demonstrate sensitivity to initial conditions
 - **Generation counter** and speed controls enable precise observation of temporal evolution
-
