@@ -226,3 +226,24 @@ pub fn draw_ui(
 
     actions
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_resolution_clamps_to_minimum() {
+        let res = GridResolution::new(8, 12);
+        assert_eq!(res.width, 16);
+        assert_eq!(res.height, 16);
+    }
+
+    #[test]
+    fn ui_state_initializes_defaults() {
+        let state = UiState::new(128, 64);
+        assert_eq!(state.res_width_str, "128");
+        assert_eq!(state.res_height_str, "64");
+        assert!(state.show_sidebar);
+        assert!(state.show_stats);
+    }
+}
