@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -172,14 +173,20 @@ impl SamplingBridge {
 }
 
 /// Spawn a background thread that periodically samples stats from the bridge
-/// and records them into the Stats store.
+/// and records them into the Stats store. Set the returned `Arc<AtomicBool>` to
+/// `true` to signal the thread to exit gracefully.
 pub fn spawn_sampling_thread(
     stats: Stats,
     bridge: Arc<SamplingBridge>,
     interval: Duration,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || loop {
+) -> (thread::JoinHandle<()>, Arc<AtomicBool>) {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_flag = shutdown.clone();
+    let handle = thread::spawn(move || loop {
         thread::sleep(interval);
+        if shutdown_flag.load(Ordering::Relaxed) {
+            break;
+        }
 
         let cur_gen = bridge
             .generation
@@ -193,7 +200,8 @@ pub fn spawn_sampling_thread(
             .unwrap_or(0);
 
         stats.record(cur_gen, pop);
-    })
+    });
+    (handle, shutdown)
 }
 
 #[cfg(test)]

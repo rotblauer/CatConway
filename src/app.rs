@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,8 @@ pub struct App {
     stats: Stats,
     /// Bridge for the sampling thread.
     sampling_bridge: Arc<SamplingBridge>,
+    /// Shutdown flag for the sampling thread.
+    _sampling_shutdown: Arc<AtomicBool>,
     /// UI state.
     ui_state: UiState,
 }
@@ -103,7 +106,7 @@ impl App {
         let sampling_bridge = Arc::new(SamplingBridge::new());
 
         // Spawn the background sampling thread.
-        let _handle = spawn_sampling_thread(
+        let (_handle, sampling_shutdown) = spawn_sampling_thread(
             stats.clone(),
             sampling_bridge.clone(),
             Duration::from_millis(100),
@@ -122,6 +125,7 @@ impl App {
             last_mouse_pos: None,
             stats,
             sampling_bridge,
+            _sampling_shutdown: sampling_shutdown,
             ui_state: UiState::new(DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE),
         }
     }
@@ -524,6 +528,7 @@ impl App {
                 log::info!("Speed: {:.1}x", self.speed);
             }
             Key::Named(NamedKey::Escape) => {
+                self._sampling_shutdown.store(true, Ordering::Relaxed);
                 if let Some(ref gpu) = self.gpu {
                     gpu.window.set_visible(false);
                 }
@@ -618,6 +623,7 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => {
+                self._sampling_shutdown.store(true, Ordering::Relaxed);
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
