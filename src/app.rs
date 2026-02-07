@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -15,9 +15,11 @@ use crate::grid::{
 };
 use crate::renderer::Renderer;
 use crate::simulation::Simulation;
+use crate::stats::{SamplingBridge, Stats, spawn_sampling_thread};
+use crate::ui::{self, PatternInfo, RuleInfo, UiState};
 
 /// Default grid dimension (square).
-const GRID_SIZE: u32 = 1024;
+const DEFAULT_GRID_SIZE: u32 = 1024;
 
 /// Initial random fill density.
 const INITIAL_DENSITY: f64 = 0.25;
@@ -45,6 +47,12 @@ pub struct App {
     /// Mouse drag state.
     dragging: bool,
     last_mouse_pos: Option<(f64, f64)>,
+    /// Statistics tracking.
+    stats: Stats,
+    /// Bridge for the sampling thread.
+    sampling_bridge: Arc<SamplingBridge>,
+    /// UI state.
+    ui_state: UiState,
 }
 
 struct GpuState {
@@ -55,6 +63,10 @@ struct GpuState {
     config: wgpu::SurfaceConfiguration,
     simulation: Simulation,
     renderer: Renderer,
+    /// egui integration state.
+    egui_ctx: egui::Context,
+    egui_winit: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
 }
 
 /// The available rule sets for exploration.
@@ -65,13 +77,37 @@ fn rule_sets() -> Vec<(&'static str, Rules)> {
         ("Day&Night B3678/S34678", Rules::day_and_night()),
         ("Seeds B2/S", Rules::seeds()),
         ("Life w/o Death B3/S*", Rules::life_without_death()),
+        ("Bugs B3-5/S4-8/R2", Rules::bugs()),
+        ("Globe B7-11/S7-11/R2", Rules::globe()),
+        ("Majority B5-8/S4-10/R2", Rules::majority()),
+    ]
+}
+
+fn pattern_list() -> Vec<(&'static str, &'static str, Vec<(i32, i32)>)> {
+    vec![
+        ("Glider", "1", pattern_glider()),
+        ("R-pentomino", "2", pattern_r_pentomino()),
+        ("Acorn", "3", pattern_acorn()),
+        ("Gosper Gun", "4", pattern_gosper_gun()),
+        ("LWSS", "5", pattern_lwss()),
     ]
 }
 
 impl App {
     pub fn new() -> Self {
-        let mut grid = Grid::new(GRID_SIZE, GRID_SIZE);
+        let mut grid = Grid::new(DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE);
         grid.randomize(INITIAL_DENSITY);
+
+        let total_cells = (grid.width as u64) * (grid.height as u64);
+        let stats = Stats::new(total_cells);
+        let sampling_bridge = Arc::new(SamplingBridge::new());
+
+        // Spawn the background sampling thread.
+        let _handle = spawn_sampling_thread(
+            stats.clone(),
+            sampling_bridge.clone(),
+            Duration::from_millis(100),
+        );
 
         Self {
             gpu: None,
@@ -84,6 +120,9 @@ impl App {
             current_rule_idx: 0,
             dragging: false,
             last_mouse_pos: None,
+            stats,
+            sampling_bridge,
+            ui_state: UiState::new(DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE),
         }
     }
 
@@ -94,7 +133,9 @@ impl App {
             ..Default::default()
         });
 
-        let surface = instance.create_surface(window.clone()).expect("Failed to create surface");
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("Failed to create surface");
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -141,6 +182,18 @@ impl App {
         let simulation = Simulation::new(&device, &self.grid.cells, self.grid.sim_params());
         let renderer = Renderer::new(&device, surface_format);
 
+        // ── egui setup ──
+        let egui_ctx = egui::Context::default();
+        let egui_winit = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui_ctx.viewport_id(),
+            &window,
+            Some(window.scale_factor() as f32),
+            None, // theme
+            None, // max_texture_side
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
+
         self.gpu = Some(GpuState {
             window,
             surface,
@@ -149,6 +202,9 @@ impl App {
             config,
             simulation,
             renderer,
+            egui_ctx,
+            egui_winit,
+            egui_renderer,
         });
     }
 
@@ -164,20 +220,23 @@ impl App {
     }
 
     fn render_frame(&mut self) {
-        let Some(ref mut gpu) = self.gpu else { return };
+        if self.gpu.is_none() {
+            return;
+        }
 
         // Timing
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f64();
         self.last_frame = now;
 
-        // Step simulation
+        // ── Phase 1: Simulation step ──
         if self.running {
             self.step_accumulator += dt * BASE_SPEED * self.speed;
             let steps = self.step_accumulator as u32;
             self.step_accumulator -= steps as f64;
 
             if steps > 0 {
+                let gpu = self.gpu.as_mut().unwrap();
                 let mut encoder =
                     gpu.device
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -190,57 +249,245 @@ impl App {
             }
         }
 
-        // Render
-        let output = match gpu.surface.get_current_texture() {
-            Ok(tex) => tex,
-            Err(wgpu::SurfaceError::Lost) => {
-                gpu.surface.configure(&gpu.device, &gpu.config);
-                return;
+        // Update sampling bridge for the background stats thread.
+        {
+            let gpu = self.gpu.as_ref().unwrap();
+            self.sampling_bridge
+                .update(gpu.simulation.generation, self.grid.population());
+        }
+
+        // ── Phase 2: egui UI pass ──
+        let (actions, paint_jobs, screen_descriptor, textures_delta, _pixels_per_point) = {
+            let gpu = self.gpu.as_mut().unwrap();
+            let raw_input = gpu.egui_winit.take_egui_input(&gpu.window);
+            gpu.egui_ctx.begin_pass(raw_input);
+
+            let rule_infos: Vec<RuleInfo> = rule_sets()
+                .iter()
+                .enumerate()
+                .map(|(i, (name, _))| RuleInfo {
+                    name,
+                    selected: i == self.current_rule_idx,
+                })
+                .collect();
+
+            let pat_infos: Vec<PatternInfo> = pattern_list()
+                .iter()
+                .map(|(name, key, _)| PatternInfo { name, key })
+                .collect();
+
+            let actions = ui::draw_ui(
+                &gpu.egui_ctx,
+                &mut self.ui_state,
+                self.running,
+                self.speed,
+                gpu.simulation.generation,
+                &rule_infos,
+                &pat_infos,
+                &self.stats,
+                self.grid.width,
+                self.grid.height,
+            );
+
+            let egui_output = gpu.egui_ctx.end_pass();
+            gpu.egui_winit
+                .handle_platform_output(&gpu.window, egui_output.platform_output);
+
+            let ppp = egui_output.pixels_per_point;
+            let paint_jobs = gpu.egui_ctx.tessellate(egui_output.shapes, ppp);
+
+            let screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [gpu.config.width, gpu.config.height],
+                pixels_per_point: gpu.window.scale_factor() as f32,
+            };
+
+            for (id, delta) in &egui_output.textures_delta.set {
+                gpu.egui_renderer
+                    .update_texture(&gpu.device, &gpu.queue, *id, delta);
             }
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                log::error!("Out of GPU memory");
-                return;
-            }
-            Err(e) => {
-                log::warn!("Surface error: {e:?}");
-                return;
-            }
+
+            let mut buf_encoder =
+                gpu.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            gpu.egui_renderer.update_buffers(
+                &gpu.device,
+                &gpu.queue,
+                &mut buf_encoder,
+                &paint_jobs,
+                &screen_descriptor,
+            );
+            gpu.queue.submit(std::iter::once(buf_encoder.finish()));
+
+            (
+                actions,
+                paint_jobs,
+                screen_descriptor,
+                egui_output.textures_delta,
+                ppp,
+            )
         };
 
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        // ── Phase 3: Handle UI actions (may modify grid, rules, etc.) ──
+        self.handle_ui_actions(actions);
 
-        // Update camera uniform
-        let cam_uniform = self.camera.uniform(self.grid.width, self.grid.height);
-        gpu.renderer.update_camera(&gpu.queue, &cam_uniform);
+        // ── Phase 4: Render ──
+        {
+            let gpu = self.gpu.as_mut().unwrap();
 
-        // Update render bind group to point to the current simulation buffer
-        gpu.renderer
-            .update_bind_group(&gpu.device, gpu.simulation.current_buffer());
+            let output = match gpu.surface.get_current_texture() {
+                Ok(tex) => tex,
+                Err(wgpu::SurfaceError::Lost) => {
+                    gpu.surface.configure(&gpu.device, &gpu.config);
+                    return;
+                }
+                Err(wgpu::SurfaceError::OutOfMemory) => {
+                    log::error!("Out of GPU memory");
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("Surface error: {e:?}");
+                    return;
+                }
+            };
 
-        let mut encoder =
-            gpu.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Render Encoder"),
-                });
+            let view = output
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
 
-        gpu.renderer.render(&mut encoder, &view);
-        gpu.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+            // Update camera uniform
+            let cam_uniform = self.camera.uniform(self.grid.width, self.grid.height);
+            gpu.renderer.update_camera(&gpu.queue, &cam_uniform);
 
-        // Update window title with stats
-        let generation = gpu.simulation.generation;
-        let rules = rule_sets();
-        let rule_name = rules[self.current_rule_idx].0;
-        let status = if self.running { "▶" } else { "⏸" };
-        gpu.window.set_title(&format!(
-            "CatConway | {status} Gen {generation} | {rule_name} | Speed: {:.1}x | {GRID_SIZE}×{GRID_SIZE}",
-            self.speed,
-        ));
+            // Update render bind group to point to the current simulation buffer
+            gpu.renderer
+                .update_bind_group(&gpu.device, gpu.simulation.current_buffer());
 
-        // Request next frame
-        gpu.window.request_redraw();
+            let mut encoder =
+                gpu.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Render Encoder"),
+                    });
+
+            gpu.renderer.render(&mut encoder, &view);
+
+            // Render egui on top
+            {
+                let mut pass = encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("egui Render Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    })
+                    .forget_lifetime();
+                gpu.egui_renderer
+                    .render(&mut pass, &paint_jobs, &screen_descriptor);
+            }
+
+            gpu.queue.submit(std::iter::once(encoder.finish()));
+            output.present();
+
+            for id in &textures_delta.free {
+                gpu.egui_renderer.free_texture(id);
+            }
+
+            // Update window title with stats
+            let generation = gpu.simulation.generation;
+            let rules = rule_sets();
+            let rule_name = rules[self.current_rule_idx].0;
+            let status = if self.running { "▶" } else { "⏸" };
+            gpu.window.set_title(&format!(
+                "CatConway | {status} Gen {generation} | {rule_name} | Speed: {:.1}x | {}×{}",
+                self.speed, self.grid.width, self.grid.height,
+            ));
+
+            // Request next frame
+            gpu.window.request_redraw();
+        }
+    }
+
+    fn handle_ui_actions(&mut self, actions: ui::UiActions) {
+        if actions.toggle_pause {
+            self.running = !self.running;
+        }
+        if actions.step_once && !self.running {
+            if let Some(ref mut gpu) = self.gpu {
+                let mut encoder =
+                    gpu.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Step Encoder"),
+                        });
+                gpu.simulation.step(&mut encoder);
+                gpu.queue.submit(std::iter::once(encoder.finish()));
+            }
+        }
+        if actions.randomize {
+            self.grid.randomize(INITIAL_DENSITY);
+            self.upload_grid();
+            self.stats.clear();
+        }
+        if actions.clear {
+            self.grid.clear();
+            self.upload_grid();
+            self.stats.clear();
+        }
+        if actions.reset_camera {
+            self.camera.reset();
+        }
+        if let Some(idx) = actions.select_rule {
+            let rules = rule_sets();
+            if idx < rules.len() {
+                self.current_rule_idx = idx;
+                self.grid.rules = rules[idx].1;
+                if let Some(ref gpu) = self.gpu {
+                    gpu.simulation
+                        .update_rules(&gpu.queue, self.grid.sim_params());
+                }
+            }
+        }
+        if let Some(idx) = actions.load_pattern {
+            let patterns = pattern_list();
+            if idx < patterns.len() {
+                self.grid.clear();
+                self.grid.place_pattern(&patterns[idx].2, None);
+                self.upload_grid();
+                self.stats.clear();
+            }
+        }
+        if let Some(new_speed) = actions.speed_change {
+            self.speed = new_speed.clamp(0.1, 100.0);
+        }
+        if let Some(res) = actions.apply_resolution {
+            self.apply_new_resolution(res.width, res.height);
+        }
+    }
+
+    fn apply_new_resolution(&mut self, width: u32, height: u32) {
+        self.grid = Grid::new(width, height);
+        self.grid.rules = rule_sets()[self.current_rule_idx].1;
+        self.grid.randomize(INITIAL_DENSITY);
+
+        let total = (width as u64) * (height as u64);
+        self.stats.set_total_cells(total);
+        self.stats.clear();
+
+        if let Some(ref mut gpu) = self.gpu {
+            gpu.simulation =
+                Simulation::new(&gpu.device, &self.grid.cells, self.grid.sim_params());
+        }
+
+        self.ui_state.res_width_str = width.to_string();
+        self.ui_state.res_height_str = height.to_string();
+        self.camera.reset();
+        log::info!("Resolution changed to {width}×{height}");
     }
 
     fn handle_key(&mut self, event: KeyEvent) {
@@ -251,15 +498,19 @@ impl App {
         match event.logical_key {
             Key::Named(NamedKey::Space) => {
                 self.running = !self.running;
-                log::info!("Simulation {}", if self.running { "resumed" } else { "paused" });
+                log::info!(
+                    "Simulation {}",
+                    if self.running { "resumed" } else { "paused" }
+                );
             }
             Key::Named(NamedKey::ArrowRight) if !self.running => {
                 // Single step
                 if let Some(ref mut gpu) = self.gpu {
                     let mut encoder =
-                        gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Step Encoder"),
-                        });
+                        gpu.device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("Step Encoder"),
+                            });
                     gpu.simulation.step(&mut encoder);
                     gpu.queue.submit(std::iter::once(encoder.finish()));
                 }
@@ -282,11 +533,13 @@ impl App {
                 "r" => {
                     self.grid.randomize(INITIAL_DENSITY);
                     self.upload_grid();
+                    self.stats.clear();
                     log::info!("Grid randomized");
                 }
                 "c" => {
                     self.grid.clear();
                     self.upload_grid();
+                    self.stats.clear();
                     log::info!("Grid cleared");
                 }
                 "h" => {
@@ -303,7 +556,8 @@ impl App {
                     self.current_rule_idx = (self.current_rule_idx + 1) % rules.len();
                     self.grid.rules = rules[self.current_rule_idx].1;
                     if let Some(ref gpu) = self.gpu {
-                        gpu.simulation.update_rules(&gpu.queue, self.grid.sim_params());
+                        gpu.simulation
+                            .update_rules(&gpu.queue, self.grid.sim_params());
                     }
                     log::info!("Rules: {}", rules[self.current_rule_idx].0);
                 }
@@ -317,6 +571,7 @@ impl App {
         self.grid.clear();
         self.grid.place_pattern(pattern, None);
         self.upload_grid();
+        self.stats.clear();
         log::info!("Loaded pattern: {name}");
     }
 
@@ -333,7 +588,7 @@ impl ApplicationHandler for App {
         if self.gpu.is_none() {
             let attrs = WindowAttributes::default()
                 .with_title("CatConway - GPU Accelerated Game of Life")
-                .with_inner_size(PhysicalSize::new(1024u32, 768));
+                .with_inner_size(PhysicalSize::new(1280u32, 900));
 
             let window = Arc::new(
                 event_loop
@@ -352,6 +607,15 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Let egui handle events first.
+        if let Some(ref mut gpu) = self.gpu {
+            let response = gpu.egui_winit.on_window_event(&gpu.window, &event);
+            if response.consumed {
+                gpu.window.request_redraw();
+                return;
+            }
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();

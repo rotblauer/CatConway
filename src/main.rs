@@ -3,6 +3,8 @@ mod camera;
 mod grid;
 mod renderer;
 mod simulation;
+mod stats;
+mod ui;
 
 use winit::event_loop::EventLoop;
 
@@ -20,8 +22,9 @@ fn main() {
     log::info!("  R           - Randomize grid");
     log::info!("  C           - Clear grid");
     log::info!("  N           - Next rule set");
-    log::info!("  1-5         - Load pattern (Glider, R-pentomino, Acorn, Gosper Gun, LWSS)");
+    log::info!("  1-8         - Load pattern / rule");
     log::info!("  Escape      - Quit");
+    log::info!("  Use the menu bar and sidebar for additional controls.");
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     let mut app = app::App::new();

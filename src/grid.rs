@@ -7,14 +7,17 @@ pub struct Rules {
     pub birth: u32,
     /// Bitmask: bit `i` set means a live cell with `i` neighbors survives.
     pub survival: u32,
+    /// Neighborhood radius: 1 = Moore (8 neighbors), 2 = extended (24 neighbors).
+    pub radius: u32,
 }
 
 impl Rules {
     /// Standard Conway's Game of Life: B3/S23
     pub fn conway() -> Self {
         Self {
-            birth: 1 << 3,              // birth with exactly 3 neighbors
-            survival: (1 << 2) | (1 << 3), // survive with 2 or 3 neighbors
+            birth: 1 << 3,
+            survival: (1 << 2) | (1 << 3),
+            radius: 1,
         }
     }
 
@@ -23,6 +26,7 @@ impl Rules {
         Self {
             birth: (1 << 3) | (1 << 6),
             survival: (1 << 2) | (1 << 3),
+            radius: 1,
         }
     }
 
@@ -31,6 +35,7 @@ impl Rules {
         Self {
             birth: (1 << 3) | (1 << 6) | (1 << 7) | (1 << 8),
             survival: (1 << 3) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8),
+            radius: 1,
         }
     }
 
@@ -39,6 +44,7 @@ impl Rules {
         Self {
             birth: 1 << 2,
             survival: 0,
+            radius: 1,
         }
     }
 
@@ -47,8 +53,48 @@ impl Rules {
         Self {
             birth: 1 << 3,
             survival: 0x1FF, // bits 0-8 all set
+            radius: 1,
         }
     }
+
+    /// Bugs: B3-5/S4-8/R2 - amoeba-like blobs that move and split.
+    /// Extended Moore neighborhood (radius 2, 24 neighbors).
+    pub fn bugs() -> Self {
+        Self {
+            birth: bits(3..=5),
+            survival: bits(4..=8),
+            radius: 2,
+        }
+    }
+
+    /// Globe: B7-11/S7-11/R2 - stable growing blob structures.
+    /// Extended Moore neighborhood (radius 2, 24 neighbors).
+    pub fn globe() -> Self {
+        Self {
+            birth: bits(7..=11),
+            survival: bits(7..=11),
+            radius: 2,
+        }
+    }
+
+    /// Majority: B5-8/S4-10/R2 - majority-vote dynamics with organic boundaries.
+    /// Extended Moore neighborhood (radius 2, 24 neighbors).
+    pub fn majority() -> Self {
+        Self {
+            birth: bits(5..=8),
+            survival: bits(4..=10),
+            radius: 2,
+        }
+    }
+}
+
+/// Build a bitmask with bits set for each value in the inclusive range.
+fn bits(range: std::ops::RangeInclusive<u32>) -> u32 {
+    let mut mask = 0u32;
+    for i in range {
+        mask |= 1 << i;
+    }
+    mask
 }
 
 impl Default for Rules {
@@ -57,7 +103,7 @@ impl Default for Rules {
     }
 }
 
-/// GPU-compatible simulation parameters.
+/// GPU-compatible simulation parameters (padded to 32 bytes for uniform alignment).
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SimParams {
@@ -65,6 +111,10 @@ pub struct SimParams {
     pub height: u32,
     pub birth_rule: u32,
     pub survival_rule: u32,
+    pub neighborhood_radius: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 /// Manages the grid state on the CPU side (for initialization and pattern loading).
@@ -136,6 +186,10 @@ impl Grid {
             height: self.height,
             birth_rule: self.rules.birth,
             survival_rule: self.rules.survival,
+            neighborhood_radius: self.rules.radius,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         }
     }
 }
@@ -253,5 +307,26 @@ mod tests {
         let p = grid.sim_params();
         assert_eq!(p.width, 256);
         assert_eq!(p.height, 128);
+        assert_eq!(p.neighborhood_radius, 1);
+    }
+
+    #[test]
+    fn test_extended_rules_radius() {
+        assert_eq!(Rules::conway().radius, 1);
+        assert_eq!(Rules::highlife().radius, 1);
+        assert_eq!(Rules::bugs().radius, 2);
+        assert_eq!(Rules::globe().radius, 2);
+        assert_eq!(Rules::majority().radius, 2);
+    }
+
+    #[test]
+    fn test_bits_helper() {
+        let bugs = Rules::bugs();
+        // B3-5: bits 3,4,5 set
+        assert_ne!(bugs.birth & (1 << 3), 0);
+        assert_ne!(bugs.birth & (1 << 4), 0);
+        assert_ne!(bugs.birth & (1 << 5), 0);
+        assert_eq!(bugs.birth & (1 << 2), 0);
+        assert_eq!(bugs.birth & (1 << 6), 0);
     }
 }

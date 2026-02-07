@@ -1,5 +1,6 @@
 // Conway's Game of Life - GPU Compute Shader
 // Supports configurable birth/survival rules via bitmasks for dynamical systems exploration.
+// Supports extended neighborhoods (radius 1 = 8 neighbors, radius 2 = 24 neighbors, etc.).
 // Each workgroup thread processes one cell.
 
 struct SimParams {
@@ -7,6 +8,10 @@ struct SimParams {
     height: u32,
     birth_rule: u32,    // bitmask: bit i set means a dead cell with i neighbors becomes alive
     survival_rule: u32, // bitmask: bit i set means an alive cell with i neighbors survives
+    neighborhood_radius: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input: array<u32>;
@@ -24,11 +29,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let w = params.width;
     let h = params.height;
     let idx = y * w + x;
+    let r = i32(params.neighborhood_radius);
 
-    // Count live neighbors with toroidal wrapping
+    // Count live neighbors with toroidal wrapping over configurable radius
     var neighbors: u32 = 0u;
-    for (var dy: i32 = -1; dy <= 1; dy++) {
-        for (var dx: i32 = -1; dx <= 1; dx++) {
+    for (var dy: i32 = -r; dy <= r; dy++) {
+        for (var dx: i32 = -r; dx <= r; dx++) {
             if (dx == 0 && dy == 0) {
                 continue;
             }
