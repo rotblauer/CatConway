@@ -12,6 +12,10 @@ bytemuck = { version = "1", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
 rand = "0.8"
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = "0.31"
+egui_plot = "0.31"
 
 [profile.release]
 opt-level = 3
