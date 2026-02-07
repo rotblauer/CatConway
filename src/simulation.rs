@@ -169,10 +169,9 @@ impl Simulation {
 
     /// Returns the storage buffer that currently holds the latest grid state.
     pub fn current_buffer(&self) -> &wgpu::Buffer {
-        // After a step, `current` points to the buffer that was just written.
-        // The output buffer from the last step is at index (1 - current) before swap,
-        // but we already swapped, so current is now the output.
-        &self.storage_buffers[1 - self.current]
+        // After a step, `current` has been swapped to point at the buffer that
+        // was just written (the output of the last compute dispatch).
+        &self.storage_buffers[self.current]
     }
 
     /// Upload new cell data to the grid (resets to generation 0).
