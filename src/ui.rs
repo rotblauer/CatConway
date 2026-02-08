@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use egui_plot::{Line, PlotPoints, Points};
 
-use crate::classify::{BehaviorClass, ClassifiedRule, FEATURE_NAMES};
+use crate::classify::{BehaviorClass, ClassifiedRule, ClusterSummary, FEATURE_NAMES};
 use crate::stats::Stats;
 
 /// Desired grid resolution chosen via the UI.
@@ -127,6 +127,8 @@ pub struct ClassifyInfo {
     pub class_counts: HashMap<BehaviorClass, usize>,
     /// All classified results (or filtered subset).
     pub results: Vec<ClassifiedRule>,
+    /// Per-cluster interpretation summaries from the latest UMAP run.
+    pub cluster_summaries: Vec<ClusterSummary>,
 }
 
 /// Draw the egui overlay UI and return any actions the user triggered.
@@ -504,7 +506,7 @@ pub fn draw_ui(
                         })
                         .collect();
 
-                    // Legend for UMAP clusters.
+                    // Legend for UMAP clusters with interpretations.
                     for (c, color) in umap_colors.iter().enumerate() {
                         let count = classify_info
                             .results
@@ -512,13 +514,23 @@ pub fn draw_ui(
                             .filter(|r| r.umap_cluster == Some(c))
                             .count();
                         if count > 0 {
+                            let interp = classify_info
+                                .cluster_summaries
+                                .iter()
+                                .find(|s| s.cluster_id == c)
+                                .map(|s| s.interpretation.as_str())
+                                .unwrap_or("");
                             ui.horizontal(|ui| {
                                 let (rect, _) = ui.allocate_exact_size(
                                     egui::vec2(12.0, 12.0),
                                     egui::Sense::hover(),
                                 );
                                 ui.painter().rect_filled(rect, 0.0, *color);
-                                ui.label(format!("Cluster {c}: {count}"));
+                                if interp.is_empty() {
+                                    ui.label(format!("Cluster {c}: {count}"));
+                                } else {
+                                    ui.label(format!("Cluster {c}: {count} — {interp}"));
+                                }
                             });
                         }
                     }

@@ -843,6 +843,239 @@ pub fn umap_cluster(
     (projection, assignments)
 }
 
+// ── UMAP cluster interpretation ─────────────────────────────────────────────
+
+/// Summary statistics for a single UMAP cluster, with an interpretive label
+/// derived from the mean/median of the underlying behavioral metrics.
+#[derive(Debug, Clone)]
+pub struct ClusterSummary {
+    /// Cluster index.
+    pub cluster_id: usize,
+    /// Number of rules in this cluster.
+    pub count: usize,
+    /// Per-feature mean values (indexed by FEATURE_NAMES).
+    pub mean_metrics: [f64; 10],
+    /// Per-feature median values (indexed by FEATURE_NAMES).
+    pub median_metrics: [f64; 10],
+    /// Human-readable interpretation of the cluster character.
+    pub interpretation: String,
+}
+
+/// Compute per-cluster summaries (mean, median, interpretation) for the given
+/// UMAP cluster assignments and feature vectors.
+pub fn compute_cluster_summaries(
+    features: &[[f64; 10]],
+    assignments: &[usize],
+) -> Vec<ClusterSummary> {
+    if features.is_empty() || assignments.is_empty() {
+        return Vec::new();
+    }
+    let max_cluster = assignments.iter().copied().max().unwrap_or(0);
+    let mut summaries = Vec::new();
+
+    for c in 0..=max_cluster {
+        let indices: Vec<usize> = assignments
+            .iter()
+            .enumerate()
+            .filter(|&(_, a)| *a == c)
+            .map(|(i, _)| i)
+            .collect();
+        if indices.is_empty() {
+            continue;
+        }
+        let count = indices.len();
+        let n = count as f64;
+
+        // Compute mean.
+        let mut mean = [0.0f64; 10];
+        for &i in &indices {
+            for (j, &v) in features[i].iter().enumerate() {
+                mean[j] += v;
+            }
+        }
+        for m in &mut mean {
+            *m /= n;
+        }
+
+        // Compute median using partial sort (O(n) instead of O(n log n)).
+        let mut median = [0.0f64; 10];
+        for j in 0..10 {
+            let mut vals: Vec<f64> = indices.iter().map(|&i| features[i][j]).collect();
+            let mid = vals.len() / 2;
+            vals.select_nth_unstable_by(mid, |a, b| {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            median[j] = if vals.len() % 2 == 0 {
+                // For even length, also need the element just below mid.
+                let lower = vals[..mid]
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                (lower + vals[mid]) / 2.0
+            } else {
+                vals[mid]
+            };
+        }
+
+        let interpretation = interpret_cluster(&mean);
+
+        summaries.push(ClusterSummary {
+            cluster_id: c,
+            count,
+            mean_metrics: mean,
+            median_metrics: median,
+            interpretation,
+        });
+    }
+
+    summaries
+}
+
+/// Derive a human-readable interpretation from the mean metrics of a cluster.
+///
+/// The interpretation is built by examining the mean values of each metric:
+/// - **variation** (CV): high (>0.10) → volatile dynamics, low (<0.01) → stable
+/// - **mean_density**: high (>0.7) → crowded/saturated, low (<0.1) → sparse
+/// - **trend**: positive (>0.0005) → growing population, negative (<-0.0005) → declining
+/// - **autocorrelation**: high (>0.7) → persistent/correlated, low (<0.2) → memoryless
+/// - **entropy**: high (>2.5) → high complexity, low (<0.5) → predictable
+/// - **dominant_period**: >0 → periodic oscillation detected
+/// - **roughness**: high (>0.02) → jagged/noisy, low (<0.005) → smooth
+fn interpret_cluster(mean: &[f64; 10]) -> String {
+    // Indices: 0=variation, 1=mean_density, 2=final_density, 3=density_range,
+    //          4=trend, 5=autocorrelation, 6=entropy, 7=dominant_period,
+    //          8=monotonic_fraction, 9=roughness
+    let variation = mean[0];
+    let density = mean[1];
+    let trend = mean[4];
+    let autocorrelation = mean[5];
+    let entropy = mean[6];
+    let period = mean[7];
+    let roughness = mean[9];
+
+    let mut traits = Vec::new();
+
+    // Variation-based description
+    if variation > 0.10 {
+        traits.push("volatile");
+    } else if variation < 0.01 {
+        traits.push("stable");
+    }
+
+    // Density-based description
+    if density > 0.7 {
+        traits.push("dense");
+    } else if density < 0.1 {
+        traits.push("sparse");
+    }
+
+    // Trend-based description
+    if trend > 0.0005 {
+        traits.push("growing");
+    } else if trend < -0.0005 {
+        traits.push("declining");
+    }
+
+    // Autocorrelation-based description
+    if autocorrelation > 0.7 {
+        traits.push("persistent");
+    } else if autocorrelation < 0.2 {
+        traits.push("memoryless");
+    }
+
+    // Entropy-based description
+    if entropy > 2.5 {
+        traits.push("complex");
+    } else if entropy < 0.5 {
+        traits.push("simple");
+    }
+
+    // Period-based description
+    if period > 0.5 {
+        traits.push("periodic");
+    }
+
+    // Roughness-based description
+    if roughness > 0.02 {
+        traits.push("noisy");
+    } else if roughness < 0.005 {
+        traits.push("smooth");
+    }
+
+    if traits.is_empty() {
+        "mixed dynamics".to_string()
+    } else {
+        traits.join(", ")
+    }
+}
+
+// ── Background UMAP thread helper ───────────────────────────────────────────
+
+/// Spawn a UMAP computation in a background thread if one is not already
+/// running.  The thread reads features, runs UMAP + k-means on the 2D
+/// projection, computes cluster summaries, and writes the results back to
+/// shared state.  Returns `true` if a new thread was spawned.
+fn spawn_umap_background(
+    state: &Arc<Mutex<ClassifyState>>,
+    umap_running: &Arc<AtomicBool>,
+    n_epochs: usize,
+    k: usize,
+) -> bool {
+    // Ensure at most one UMAP thread is active at any time.
+    if umap_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return false;
+    }
+
+    // Snapshot features under the lock, then release it before the heavy work.
+    // The snapshot count is recorded so we only write back to the first N
+    // entries.  The results vector is append-only (new rules are pushed,
+    // never removed or reordered), so the first N entries are guaranteed to
+    // match the features we projected.
+    let (features, snapshot_len): (Vec<[f64; 10]>, usize) = {
+        let s = state.lock().unwrap();
+        if s.results.len() < 4 {
+            umap_running.store(false, Ordering::SeqCst);
+            return false;
+        }
+        let feats: Vec<[f64; 10]> = s.results.iter().map(|r| r.metrics.feature_vector()).collect();
+        let len = feats.len();
+        (feats, len)
+    };
+
+    let state = Arc::clone(state);
+    let umap_running = Arc::clone(umap_running);
+
+    thread::spawn(move || {
+        // Heavy computation outside of any lock.
+        let (projection, umap_assignments) =
+            umap_cluster(&features, UMAP_N_NEIGHBORS, n_epochs, k);
+        let summaries = compute_cluster_summaries(&features, &umap_assignments);
+
+        // Write results back under the lock.  Only update the first
+        // snapshot_len entries — these are positionally stable because the
+        // results vector is append-only.  Any results added after the
+        // snapshot simply won't have UMAP coordinates until the next run.
+        if let Ok(mut s) = state.lock() {
+            if s.results.len() >= snapshot_len {
+                for i in 0..snapshot_len.min(projection.coords.len()).min(umap_assignments.len()) {
+                    s.results[i].umap_x = Some(projection.coords[i][0]);
+                    s.results[i].umap_y = Some(projection.coords[i][1]);
+                    s.results[i].umap_cluster = Some(umap_assignments[i]);
+                }
+            }
+            s.umap_cluster_summaries = summaries;
+        }
+
+        umap_running.store(false, Ordering::SeqCst);
+        log::info!("Background UMAP projection complete ({} points)", features.len());
+    });
+
+    true
+}
+
 // ── Background classification thread ────────────────────────────────────────
 
 /// Progress snapshot of the classification search.
@@ -854,6 +1087,8 @@ pub struct ClassifyProgress {
     pub paused: bool,
     /// Counts per behavior class.
     pub class_counts: HashMap<BehaviorClass, usize>,
+    /// Per-cluster interpretation summaries from the latest UMAP run.
+    pub cluster_summaries: Vec<ClusterSummary>,
 }
 
 /// Shared state for the background classification thread.
@@ -862,6 +1097,8 @@ struct ClassifyState {
     results: Vec<ClassifiedRule>,
     total_examined: usize,
     running: bool,
+    /// Cluster interpretation summaries from the latest UMAP projection.
+    umap_cluster_summaries: Vec<ClusterSummary>,
 }
 
 /// Thread-safe handle to the background classification search.
@@ -869,6 +1106,8 @@ pub struct ClassifyHandle {
     state: Arc<Mutex<ClassifyState>>,
     shutdown: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    /// Guards against concurrent UMAP threads — at most one runs at a time.
+    umap_running: Arc<AtomicBool>,
 }
 
 impl ClassifyHandle {
@@ -885,6 +1124,7 @@ impl ClassifyHandle {
             running: s.running,
             paused: self.paused.load(Ordering::Relaxed),
             class_counts,
+            cluster_summaries: s.umap_cluster_summaries.clone(),
         }
     }
 
@@ -905,31 +1145,27 @@ impl ClassifyHandle {
             .collect()
     }
 
-    /// Re-cluster all results using k-means with the given k, and update UMAP projection.
+    /// Re-cluster all results using k-means with the given k.
+    /// K-means is fast and runs synchronously.  UMAP is spawned in a
+    /// background thread so it does not block the caller.
     pub fn recluster(&self, k: usize) {
-        let mut s = self.state.lock().unwrap();
-        if s.results.is_empty() {
-            return;
-        }
-        let features: Vec<[f64; 10]> = s.results.iter().map(|r| r.metrics.feature_vector()).collect();
-        let assignments = kmeans_cluster(&features, k, 50);
-        for (i, r) in s.results.iter_mut().enumerate() {
-            if i < assignments.len() {
-                r.cluster = Some(assignments[i]);
+        {
+            let mut s = self.state.lock().unwrap();
+            if s.results.is_empty() {
+                return;
             }
-        }
-
-        // Run UMAP projection and cluster on the projection.
-        if features.len() >= 4 {
-            let (projection, umap_assignments) = umap_cluster(&features, UMAP_N_NEIGHBORS, UMAP_N_EPOCHS, k);
+            let features: Vec<[f64; 10]> =
+                s.results.iter().map(|r| r.metrics.feature_vector()).collect();
+            let assignments = kmeans_cluster(&features, k, 50);
             for (i, r) in s.results.iter_mut().enumerate() {
-                if i < projection.coords.len() && i < umap_assignments.len() {
-                    r.umap_x = Some(projection.coords[i][0]);
-                    r.umap_y = Some(projection.coords[i][1]);
-                    r.umap_cluster = Some(umap_assignments[i]);
+                if i < assignments.len() {
+                    r.cluster = Some(assignments[i]);
                 }
             }
         }
+
+        // Spawn UMAP in a background thread (only if none is already running).
+        spawn_umap_background(&self.state, &self.umap_running, UMAP_N_EPOCHS, k);
     }
 
     /// Signal the thread to stop.
@@ -1115,19 +1351,22 @@ pub fn spawn_classify(config: ClassifyConfig) -> ClassifyHandle {
         examined,
         results: prior_results,
         running: true,
+        umap_cluster_summaries: Vec::new(),
     }));
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let paused = Arc::new(AtomicBool::new(false));
+    let umap_running = Arc::new(AtomicBool::new(false));
 
     let handle = ClassifyHandle {
         state: state.clone(),
         shutdown: shutdown.clone(),
         paused: paused.clone(),
+        umap_running: umap_running.clone(),
     };
 
     thread::spawn(move || {
-        run_classify(state, shutdown, paused, config);
+        run_classify(state, shutdown, paused, umap_running, config);
     });
 
     handle
@@ -1137,6 +1376,7 @@ fn run_classify(
     state: Arc<Mutex<ClassifyState>>,
     shutdown: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    umap_running: Arc<AtomicBool>,
     config: ClassifyConfig,
 ) {
     ensure_header(&config.results_path);
@@ -1144,8 +1384,11 @@ fn run_classify(
     let max_n = max_neighbors(config.radius);
     let mask_count = 1u32 << (max_n + 1);
 
-    /// Number of newly classified rules between re-clustering passes.
+    /// Number of newly classified rules between k-means re-clustering passes.
     const RECLUSTER_BATCH_SIZE: u32 = 100;
+    /// Number of newly classified rules between UMAP projections.
+    /// UMAP is much more expensive than k-means, so we run it ~5× less often.
+    const UMAP_BATCH_SIZE: u32 = 500;
 
     let mut batch_count = 0u32;
 
@@ -1205,7 +1448,7 @@ fn run_classify(
 
             batch_count += 1;
 
-            // Re-cluster every 100 new rules to keep clusters up-to-date.
+            // Re-cluster with fast k-means every RECLUSTER_BATCH_SIZE rules.
             if batch_count % RECLUSTER_BATCH_SIZE == 0 {
                 let s = state.lock().unwrap();
                 if s.results.len() >= 8 {
@@ -1215,28 +1458,28 @@ fn run_classify(
                     let k = 8.min(features.len());
                     let assignments = kmeans_cluster(&features, k, 30);
 
-                    // Run UMAP projection alongside re-clustering.
-                    let (projection, umap_assignments) = if features.len() >= 4 {
-                        let (p, a) = umap_cluster(&features, UMAP_N_NEIGHBORS, UMAP_N_EPOCHS_INCREMENTAL, k);
-                        (Some(p), Some(a))
-                    } else {
-                        (None, None)
-                    };
-
                     let mut s = state.lock().unwrap();
                     for (i, r) in s.results.iter_mut().enumerate() {
                         if i < assignments.len() {
                             r.cluster = Some(assignments[i]);
                         }
-                        if let (Some(proj), Some(ua)) = (&projection, &umap_assignments) {
-                            if i < proj.coords.len() && i < ua.len() {
-                                r.umap_x = Some(proj.coords[i][0]);
-                                r.umap_y = Some(proj.coords[i][1]);
-                                r.umap_cluster = Some(ua[i]);
-                            }
-                        }
                     }
                 }
+            }
+
+            // Spawn UMAP in a background thread less frequently (every
+            // UMAP_BATCH_SIZE rules), and only if no UMAP is already running.
+            if batch_count % UMAP_BATCH_SIZE == 0 {
+                let k = {
+                    let s = state.lock().unwrap();
+                    8.min(s.results.len())
+                };
+                spawn_umap_background(
+                    &state,
+                    &umap_running,
+                    UMAP_N_EPOCHS_INCREMENTAL,
+                    k,
+                );
             }
         }
     }
@@ -1250,29 +1493,23 @@ fn run_classify(
             let k = 8.min(features.len());
             let assignments = kmeans_cluster(&features, k, 50);
 
-            // Final UMAP projection.
-            let (projection, umap_assignments) = if features.len() >= 4 {
-                let (p, a) = umap_cluster(&features, UMAP_N_NEIGHBORS, UMAP_N_EPOCHS, k);
-                (Some(p), Some(a))
-            } else {
-                (None, None)
-            };
-
             for (i, r) in s.results.iter_mut().enumerate() {
                 if i < assignments.len() {
                     r.cluster = Some(assignments[i]);
-                }
-                if let (Some(proj), Some(ua)) = (&projection, &umap_assignments) {
-                    if i < proj.coords.len() && i < ua.len() {
-                        r.umap_x = Some(proj.coords[i][0]);
-                        r.umap_y = Some(proj.coords[i][1]);
-                        r.umap_cluster = Some(ua[i]);
-                    }
                 }
             }
         }
         s.running = false;
     }
+
+    // Final UMAP projection (spawn in background; the handle keeps
+    // the Arc alive so results will still be written back).
+    let k = {
+        let s = state.lock().unwrap();
+        8.min(s.results.len())
+    };
+    spawn_umap_background(&state, &umap_running, UMAP_N_EPOCHS, k);
+
     log::info!("Rule classification complete");
 }
 
@@ -1822,5 +2059,153 @@ mod tests {
         let sigma = find_sigma(&neighbors, 0.5, target);
         assert!(sigma > 0.0);
         assert!(sigma.is_finite());
+    }
+
+    // ── Cluster summaries & interpretation ──
+
+    #[test]
+    fn cluster_summaries_empty_input() {
+        let summaries = compute_cluster_summaries(&[], &[]);
+        assert!(summaries.is_empty());
+    }
+
+    #[test]
+    fn cluster_summaries_single_cluster() {
+        let features = vec![
+            [0.2, 0.5, 0.4, 0.1, 0.001, 0.8, 2.0, 0.0, 0.6, 0.01],
+            [0.3, 0.6, 0.5, 0.2, 0.002, 0.7, 2.5, 0.0, 0.5, 0.02],
+        ];
+        let assignments = vec![0, 0];
+        let summaries = compute_cluster_summaries(&features, &assignments);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].cluster_id, 0);
+        assert_eq!(summaries[0].count, 2);
+        // Mean of first feature: (0.2 + 0.3) / 2 = 0.25
+        assert!((summaries[0].mean_metrics[0] - 0.25).abs() < 1e-10);
+        // Median of first feature: (0.2 + 0.3) / 2 = 0.25 (even count)
+        assert!((summaries[0].median_metrics[0] - 0.25).abs() < 1e-10);
+        assert!(!summaries[0].interpretation.is_empty());
+    }
+
+    #[test]
+    fn cluster_summaries_two_clusters() {
+        let features = vec![
+            [0.005, 0.5, 0.5, 0.01, 0.0, 0.9, 0.3, 0.0, 0.5, 0.002],
+            [0.2, 0.4, 0.4, 0.3, 0.0, 0.1, 3.0, 0.0, 0.5, 0.03],
+        ];
+        let assignments = vec![0, 1];
+        let summaries = compute_cluster_summaries(&features, &assignments);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].count, 1);
+        assert_eq!(summaries[1].count, 1);
+        // Cluster 0: low variation, high autocorrelation → "stable", "persistent"
+        assert!(summaries[0].interpretation.contains("stable"));
+        assert!(summaries[0].interpretation.contains("persistent"));
+        // Cluster 1: high variation, high entropy → "volatile", "complex"
+        assert!(summaries[1].interpretation.contains("volatile"));
+        assert!(summaries[1].interpretation.contains("complex"));
+    }
+
+    #[test]
+    fn interpret_cluster_volatile_sparse_declining() {
+        let mean = [0.15, 0.05, 0.02, 0.1, -0.001, 0.1, 1.0, 0.0, 0.5, 0.01];
+        let interp = interpret_cluster(&mean);
+        assert!(interp.contains("volatile"));
+        assert!(interp.contains("sparse"));
+        assert!(interp.contains("declining"));
+    }
+
+    #[test]
+    fn interpret_cluster_stable_dense_persistent() {
+        let mean = [0.005, 0.8, 0.8, 0.01, 0.0, 0.9, 0.3, 0.0, 0.5, 0.003];
+        let interp = interpret_cluster(&mean);
+        assert!(interp.contains("stable"));
+        assert!(interp.contains("dense"));
+        assert!(interp.contains("persistent"));
+    }
+
+    #[test]
+    fn interpret_cluster_mixed_dynamics() {
+        // All values in mid-range → "mixed dynamics"
+        let mean = [0.05, 0.5, 0.5, 0.1, 0.0, 0.5, 1.5, 0.0, 0.5, 0.01];
+        let interp = interpret_cluster(&mean);
+        assert_eq!(interp, "mixed dynamics");
+    }
+
+    #[test]
+    fn interpret_cluster_periodic() {
+        let mean = [0.05, 0.5, 0.5, 0.1, 0.0, 0.5, 1.5, 5.0, 0.5, 0.01];
+        let interp = interpret_cluster(&mean);
+        assert!(interp.contains("periodic"));
+    }
+
+    // ── Background UMAP thread ──
+
+    #[test]
+    fn spawn_umap_background_prevents_concurrent() {
+        let state = Arc::new(Mutex::new(ClassifyState {
+            examined: std::collections::HashSet::new(),
+            results: Vec::new(),
+            total_examined: 0,
+            running: true,
+            umap_cluster_summaries: Vec::new(),
+        }));
+        let umap_running = Arc::new(AtomicBool::new(false));
+
+        // Too few results → should return false and not spawn.
+        assert!(!spawn_umap_background(&state, &umap_running, 10, 2));
+        assert!(!umap_running.load(Ordering::SeqCst));
+
+        // Add enough results.
+        {
+            let mut s = state.lock().unwrap();
+            for i in 0..20 {
+                let v = i as f64;
+                s.results.push(ClassifiedRule {
+                    rules: Rules::conway(),
+                    label: format!("test_{i}"),
+                    metrics: RuleMetrics {
+                        variation: v * 0.01,
+                        mean_density: 0.3 + v * 0.01,
+                        final_density: 0.3,
+                        density_range: 0.05,
+                        trend: 0.001,
+                        autocorrelation: 0.5,
+                        entropy: 2.0,
+                        dominant_period: 0,
+                        monotonic_fraction: 0.6,
+                        roughness: 0.01,
+                    },
+                    behavior: BehaviorClass::Complex,
+                    cluster: None,
+                    umap_x: None,
+                    umap_y: None,
+                    umap_cluster: None,
+                });
+            }
+        }
+
+        // First call should succeed.
+        assert!(spawn_umap_background(&state, &umap_running, 10, 3));
+        // umap_running should now be true.
+        assert!(umap_running.load(Ordering::SeqCst));
+
+        // Second call should be rejected (already running).
+        assert!(!spawn_umap_background(&state, &umap_running, 10, 3));
+
+        // Wait for the background thread to finish.
+        for _ in 0..100 {
+            if !umap_running.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!umap_running.load(Ordering::SeqCst));
+
+        // Results should now have UMAP coordinates.
+        let s = state.lock().unwrap();
+        let has_umap = s.results.iter().any(|r| r.umap_x.is_some());
+        assert!(has_umap, "Expected UMAP coordinates after background thread");
+        assert!(!s.umap_cluster_summaries.is_empty(), "Expected cluster summaries");
     }
 }
