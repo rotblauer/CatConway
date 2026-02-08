@@ -147,6 +147,15 @@ pub struct FavoritesInfo {
     pub entries: Vec<String>,
 }
 
+/// Label text for the favorite/unfavorite toggle button.
+fn favorite_button_label(is_favorite: bool) -> &'static str {
+    if is_favorite {
+        "★ Unfavorite Current Rule"
+    } else {
+        "☆ Favorite Current Rule"
+    }
+}
+
 /// Draw the egui overlay UI and return any actions the user triggered.
 pub fn draw_ui(
     ctx: &egui::Context,
@@ -213,12 +222,7 @@ pub fn draw_ui(
             });
 
             ui.menu_button("Favorites", |ui| {
-                let fav_label = if favorites_info.is_current_favorite {
-                    "★ Unfavorite Current Rule"
-                } else {
-                    "☆ Favorite Current Rule"
-                };
-                if ui.button(fav_label).clicked() {
+                if ui.button(favorite_button_label(favorites_info.is_current_favorite)).clicked() {
                     actions.toggle_favorite = true;
                     ui.close_menu();
                 }
@@ -333,12 +337,7 @@ pub fn draw_ui(
                     ui.separator();
                     ui.heading("Favorites");
                     {
-                        let fav_label = if favorites_info.is_current_favorite {
-                            "★ Unfavorite Current Rule"
-                        } else {
-                            "☆ Favorite Current Rule"
-                        };
-                        if ui.button(fav_label).clicked() {
+                        if ui.button(favorite_button_label(favorites_info.is_current_favorite)).clicked() {
                             actions.toggle_favorite = true;
                         }
 

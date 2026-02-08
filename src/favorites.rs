@@ -106,7 +106,9 @@ fn load_favorites(path: &Path) -> Vec<FavoriteRule> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let label = line.split_whitespace().next().unwrap_or("");
+        let Some(label) = line.split_whitespace().next() else {
+            continue;
+        };
         if let Some(rules) = parse_rule_label(label) {
             out.push(FavoriteRule {
                 rules,

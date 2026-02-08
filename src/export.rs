@@ -103,6 +103,12 @@ pub fn export_gif(
     let img_width = size * config.cell_scale;
     let img_height = size * config.cell_scale + config.overlay_height;
 
+    if img_width > u16::MAX as u32 || img_height > u16::MAX as u32 {
+        return Err(format!(
+            "Image dimensions {img_width}×{img_height} exceed GIF limit of 65535"
+        ));
+    }
+
     let file =
         std::fs::File::create(&path).map_err(|e| format!("Failed to create file: {e}"))?;
 
@@ -482,6 +488,9 @@ fn render_text(
     b: u8,
 ) {
     let mut cursor_x = start_x;
+    if img_width == 0 {
+        return;
+    }
     let img_height = pixels.len() as u32 / (img_width * 4);
     for ch in text.chars() {
         let glyph = char_glyph(ch);
