@@ -1166,7 +1166,8 @@ pub fn compute_cluster_summaries(
 fn interpret_cluster(mean: &[f64; NUM_FEATURES]) -> String {
     // Indices: 0=variation, 1=mean_density, 2=final_density, 3=density_range,
     //          4=trend, 5=autocorrelation, 6=entropy, 7=dominant_period,
-    //          8=monotonic_fraction, 9=roughness
+    //          8=monotonic_fraction, 9=roughness, 10=langton_lambda,
+    //          11=activity, 12=spatial_entropy, 13=damage_spreading
     let variation = mean[0];
     let density = mean[1];
     let trend = mean[4];
