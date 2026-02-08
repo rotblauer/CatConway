@@ -2805,3 +2805,152 @@ mod tests {
         assert!(ds >= 0.0 && ds <= 1.0, "Damage spreading out of range: {ds}");
     }
 }
+
+// ── Metric pair recommendations ─────────────────────────────────────────────
+
+/// A recommended pair of metrics for plotting, with description and rationale.
+#[derive(Debug, Clone)]
+pub struct MetricPairRecommendation {
+    /// Index of X-axis metric in FEATURE_NAMES.
+    pub x_idx: usize,
+    /// Index of Y-axis metric in FEATURE_NAMES.
+    pub y_idx: usize,
+    /// Short name for this pairing.
+    pub name: &'static str,
+    /// Description of what this pair reveals.
+    pub description: &'static str,
+    /// Rationale for why this is useful.
+    pub rationale: &'static str,
+}
+
+/// Returns a curated list of recommended metric pairs for exploring rule space.
+/// Pairs are ordered from most generally useful to more specialized analyses.
+pub fn recommended_metric_pairs() -> Vec<MetricPairRecommendation> {
+    vec![
+        MetricPairRecommendation {
+            x_idx: 1, // mean_density
+            y_idx: 0, // variation
+            name: "Density-Variation (Default)",
+            description: "Best overall separation of behavioral classes",
+            rationale: "Separates chaotic (high variation) from stable (low variation) rules, \
+                       while density distinguishes sparse vs. dense dynamics. Recommended starting point.",
+        },
+        MetricPairRecommendation {
+            x_idx: 10, // langton_lambda
+            y_idx: 0,  // variation
+            name: "Langton's Lambda",
+            description: "Theory-driven classification at edge of chaos",
+            rationale: "Langton's λ parameter predicts phase transitions; complex behavior \
+                       concentrates near λ ≈ 0.3. Tests the edge-of-chaos hypothesis.",
+        },
+        MetricPairRecommendation {
+            x_idx: 11, // activity
+            y_idx: 12, // spatial_entropy
+            name: "Spatial vs. Temporal Complexity",
+            description: "Separates spatial from temporal dynamics",
+            rationale: "Activity measures temporal change rate; spatial entropy measures \
+                       pattern disorder. Reveals rules with complex patterns vs. complex dynamics.",
+        },
+        MetricPairRecommendation {
+            x_idx: 0, // variation
+            y_idx: 7, // dominant_period
+            name: "Wolfram Classification",
+            description: "Separates periodic from aperiodic dynamics",
+            rationale: "Helps distinguish Wolfram's classes: fixed points, periodic orbits, \
+                       and chaotic/complex behavior (period = 0, high variation).",
+        },
+        MetricPairRecommendation {
+            x_idx: 4,  // trend
+            y_idx: 1,  // mean_density
+            name: "Growth Analysis",
+            description: "Identifies growing vs. declining rules",
+            rationale: "Positive trend + increasing density indicates growth; negative trend \
+                       shows decline. Useful for finding self-organizing patterns.",
+        },
+        MetricPairRecommendation {
+            x_idx: 13, // damage_spreading
+            y_idx: 0,  // variation
+            name: "Chaos Detection",
+            description: "Detects sensitive dependence on initial conditions",
+            rationale: "Both high damage spreading and high variation indicate chaotic dynamics. \
+                       Low damage spreading suggests robustness and order.",
+        },
+        MetricPairRecommendation {
+            x_idx: 10, // langton_lambda
+            y_idx: 12, // spatial_entropy
+            name: "Lambda-Entropy",
+            description: "Spatial complexity vs. theoretical parameter",
+            rationale: "Complex rules have moderate λ and high spatial entropy. Tests whether \
+                       spatial structure correlates with Langton's predictions.",
+        },
+        MetricPairRecommendation {
+            x_idx: 9,  // roughness
+            y_idx: 12, // spatial_entropy
+            name: "Temporal vs. Spatial Texture",
+            description: "Temporal roughness vs. spatial disorder",
+            rationale: "Roughness measures temporal texture; spatial entropy measures spatial \
+                       disorder. Distinguishes smooth vs. turbulent temporal evolution.",
+        },
+    ]
+}
+
+/// Get a default recommended metric pair (density-variation).
+pub fn default_metric_pair() -> (usize, usize) {
+    (1, 0) // mean_density, variation
+}
+
+/// Get indices of the most discriminative metrics for clustering, ordered by importance.
+pub fn most_discriminative_metrics() -> Vec<usize> {
+    vec![
+        0,  // variation — primary separator of dynamics
+        1,  // mean_density — primary separator of spatial occupancy
+        10, // langton_lambda — theoretical predictor
+        12, // spatial_entropy — spatial structure
+        11, // activity — temporal dynamism
+    ]
+}
+
+#[cfg(test)]
+mod metric_recommendation_tests {
+    use super::*;
+
+    #[test]
+    fn test_recommended_pairs_valid_indices() {
+        let pairs = recommended_metric_pairs();
+        assert!(!pairs.is_empty(), "Should have at least one recommendation");
+        
+        for pair in &pairs {
+            assert!(pair.x_idx < NUM_FEATURES, "X index out of bounds: {}", pair.x_idx);
+            assert!(pair.y_idx < NUM_FEATURES, "Y index out of bounds: {}", pair.y_idx);
+            assert!(!pair.name.is_empty(), "Name should not be empty");
+            assert!(!pair.description.is_empty(), "Description should not be empty");
+            assert!(!pair.rationale.is_empty(), "Rationale should not be empty");
+        }
+    }
+
+    #[test]
+    fn test_default_pair_valid() {
+        let (x, y) = default_metric_pair();
+        assert!(x < NUM_FEATURES);
+        assert!(y < NUM_FEATURES);
+    }
+
+    #[test]
+    fn test_discriminative_metrics_valid() {
+        let metrics = most_discriminative_metrics();
+        assert!(!metrics.is_empty(), "Should have at least one discriminative metric");
+        
+        for idx in metrics {
+            assert!(idx < NUM_FEATURES, "Metric index out of bounds: {}", idx);
+        }
+    }
+
+    #[test]
+    fn test_first_recommendation_is_default() {
+        let pairs = recommended_metric_pairs();
+        let (default_x, default_y) = default_metric_pair();
+        
+        assert_eq!(pairs[0].x_idx, default_x);
+        assert_eq!(pairs[0].y_idx, default_y);
+    }
+}

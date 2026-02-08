@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use egui_plot::{Line, PlotPoints, Points};
 
-use crate::classify::{BehaviorClass, ClassifiedRule, ClusterSummary, FEATURE_NAMES};
+use crate::classify::{BehaviorClass, ClassifiedRule, ClusterSummary, FEATURE_NAMES, recommended_metric_pairs};
 use crate::stats::Stats;
 
 /// Desired grid resolution chosen via the UI.
@@ -531,6 +531,29 @@ pub fn draw_ui(
                                 ui.selectable_value(&mut state.scatter_y, i, *name);
                             }
                         });
+                });
+
+                ui.separator();
+
+                // Recommended metric pairs section
+                ui.collapsing("📊 Recommended Metric Pairs", |ui| {
+                    ui.label("Click to apply recommended combinations:");
+                    ui.separator();
+                    
+                    for rec in recommended_metric_pairs() {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Apply").clicked() {
+                                state.scatter_x = rec.x_idx;
+                                state.scatter_y = rec.y_idx;
+                            }
+                            ui.label(rec.name);
+                        });
+                        ui.label(format!("  {}", rec.description));
+                        ui.add_space(4.0);
+                    }
+                    
+                    ui.separator();
+                    ui.label("💡 Tip: Start with Density-Variation for best overall separation");
                 });
 
                 ui.separator();

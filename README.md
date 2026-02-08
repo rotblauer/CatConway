@@ -194,7 +194,9 @@ Each candidate rule set (a pair of birth and survival bitmasks at a given neighb
 
 ## Behavior Classification
 
-Beyond binary interesting/uninteresting filtering, CatConway can classify discovered rules into **8 behavior classes** based on 10 dynamical metrics:
+Beyond binary interesting/uninteresting filtering, CatConway can classify discovered rules into **8 behavior classes** based on 14 dynamical metrics.
+
+**📊 For guidance on which metrics to plot for finding interesting groups of rules, see [docs/METRICS_GUIDE.md](docs/METRICS_GUIDE.md)**
 
 ### Dynamical Metrics (per rule)
 
@@ -210,6 +212,10 @@ Beyond binary interesting/uninteresting filtering, CatConway can classify discov
 | Dominant period | Detected cycle length (0 = aperiodic) |
 | Monotonic fraction | Fraction of steps with consistent direction of change |
 | Roughness | Mean consecutive density difference (temporal texture) |
+| Langton's λ | Fraction of rule-table entries mapping to alive (theoretical predictor) |
+| Activity | Mean fraction of cells changing state per generation |
+| Spatial entropy | Shannon entropy of 2×2 block patterns (spatial complexity) |
+| Damage spreading | Hamming distance growth from perturbation (chaos indicator) |
 
 ### Behavior Classes
 
