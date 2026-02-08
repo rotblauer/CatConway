@@ -556,8 +556,15 @@ impl App {
             if let Some(ref handle) = self.search_handle {
                 handle.stop();
             }
+            let mut search_config = search::SearchConfig::default();
+            if let Ok(size) = self.ui_state.search_grid_size_str.parse::<u32>() {
+                search_config.grid_size = size.max(16);
+            }
+            if let Ok(gens) = self.ui_state.search_generations_str.parse::<u32>() {
+                search_config.generations = gens.max(1);
+            }
             self.search_handle =
-                Some(search::spawn_search(search::SearchConfig::default()));
+                Some(search::spawn_search(search_config));
             log::info!("Rule search started");
         }
         if actions.stop_search {
@@ -677,7 +684,13 @@ impl App {
             } else {
                 RuleContext::default()
             };
-            let config = ExportConfig::default();
+            let mut config = ExportConfig::default();
+            if let Ok(size) = self.ui_state.export_grid_size_str.parse::<u32>() {
+                config.grid_size = size.max(16);
+            }
+            if let Ok(gens) = self.ui_state.export_generations_str.parse::<u32>() {
+                config.generations = gens.max(1);
+            }
 
             if actions.export_current {
                 match export::export_gif(&self.grid.rules, &config, &context) {

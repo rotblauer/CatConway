@@ -74,6 +74,14 @@ pub struct UiState {
     pub scatter_y: usize,
     /// Number of clusters for k-means.
     pub cluster_k_str: String,
+    /// Editable search grid size string.
+    pub search_grid_size_str: String,
+    /// Editable search generations string.
+    pub search_generations_str: String,
+    /// Editable export grid size string.
+    pub export_grid_size_str: String,
+    /// Editable export generations string.
+    pub export_generations_str: String,
 }
 
 impl UiState {
@@ -87,6 +95,10 @@ impl UiState {
             scatter_x: 1, // mean_density
             scatter_y: 0, // variation
             cluster_k_str: "8".to_string(),
+            search_grid_size_str: "640".to_string(),
+            search_generations_str: "3000".to_string(),
+            export_grid_size_str: "640".to_string(),
+            export_generations_str: "3000".to_string(),
         }
     }
 }
@@ -366,11 +378,32 @@ pub fn draw_ui(
                         if ui.button("📹 Export Current Rule").clicked() {
                             actions.export_current = true;
                         }
+
+                        ui.label("Export Grid Size:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.export_grid_size_str)
+                                .desired_width(80.0),
+                        );
+                        ui.label("Export Generations:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.export_generations_str)
+                                .desired_width(80.0),
+                        );
                     }
 
                     // ── Rule Search (legacy) ──
                     ui.separator();
                     ui.heading("Rule Search");
+                    ui.label("Search Grid Size:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.search_grid_size_str)
+                            .desired_width(80.0),
+                    );
+                    ui.label("Search Generations:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.search_generations_str)
+                            .desired_width(80.0),
+                    );
                     if !search_info.active {
                         if ui.button("🔍 Start Search").clicked() {
                             actions.start_search = true;
@@ -864,5 +897,9 @@ mod tests {
         assert!(state.classify_filter.is_none());
         assert_eq!(state.scatter_x, 1);
         assert_eq!(state.scatter_y, 0);
+        assert_eq!(state.search_grid_size_str, "640");
+        assert_eq!(state.search_generations_str, "3000");
+        assert_eq!(state.export_grid_size_str, "640");
+        assert_eq!(state.export_generations_str, "3000");
     }
 }
