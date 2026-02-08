@@ -2,6 +2,7 @@ mod app;
 mod camera;
 mod grid;
 mod renderer;
+pub mod search;
 mod simulation;
 mod stats;
 mod ui;

@@ -1,7 +1,7 @@
 use rand::Rng;
 
 /// Rules defining the dynamical system. Standard Conway is B3/S23.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rules {
     /// Bitmask: bit `i` set means a dead cell with `i` neighbors becomes alive.
     pub birth: u32,
