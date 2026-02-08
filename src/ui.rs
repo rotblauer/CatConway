@@ -602,11 +602,12 @@ pub fn draw_ui(
 
 /// Convert HSV color to an egui Color32. `h` is in [0, 1), `s` and `v` in [0, 1].
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> egui::Color32 {
-    let h6 = h * 6.0;
+    let h6 = (h % 1.0) * 6.0;
+    let sector = (h6 as u32) % 6;
     let c = v * s;
     let x = c * (1.0 - (h6 % 2.0 - 1.0).abs());
     let m = v - c;
-    let (r, g, b) = match h6 as u32 {
+    let (r, g, b) = match sector {
         0 => (c, x, 0.0),
         1 => (x, c, 0.0),
         2 => (0.0, c, x),

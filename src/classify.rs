@@ -616,6 +616,18 @@ fn normalize_features(features: &[[f64; 10]]) -> (Vec<[f64; 10]>, [f64; 10], [f6
 
 // ── UMAP dimensionality reduction ───────────────────────────────────────────
 
+/// Default number of nearest neighbors for UMAP graph construction.
+const UMAP_N_NEIGHBORS: usize = 15;
+/// Default number of SGD epochs for UMAP embedding optimization.
+const UMAP_N_EPOCHS: usize = 200;
+/// Fewer epochs used during periodic re-clustering to reduce latency.
+const UMAP_N_EPOCHS_INCREMENTAL: usize = 100;
+/// Random seed for deterministic UMAP initialization (reproducible embeddings).
+const UMAP_RANDOM_SEED: u64 = 42;
+/// Maximum magnitude for repulsive force gradients, preventing large jumps
+/// that can destabilize the SGD optimization.
+const REPULSIVE_FORCE_CLAMP: f64 = 4.0;
+
 /// Result of a UMAP projection: 2D coordinates for each input point.
 #[derive(Debug, Clone)]
 pub struct UmapProjection {
@@ -726,7 +738,7 @@ pub fn umap_project(features: &[[f64; 10]], n_neighbors: usize, n_epochs: usize)
     let b = 1.0;
     let initial_lr = 1.0;
 
-    let mut rng_state: u64 = 42;
+    let mut rng_state: u64 = UMAP_RANDOM_SEED;
     let mut cheap_rand = || -> f64 {
         // xorshift64
         rng_state ^= rng_state << 13;
@@ -764,9 +776,8 @@ pub fn umap_project(features: &[[f64; 10]], n_neighbors: usize, n_epochs: usize)
             let dist_sq = dx * dx + dy * dy + 1e-10;
             let grad = 2.0 * b / ((0.001 + dist_sq) * (1.0 + a * dist_sq.powf(b)));
             let force = grad * lr;
-            let clamp = 4.0;
-            let fx = (force * dx).clamp(-clamp, clamp);
-            let fy = (force * dy).clamp(-clamp, clamp);
+            let fx = (force * dx).clamp(-REPULSIVE_FORCE_CLAMP, REPULSIVE_FORCE_CLAMP);
+            let fy = (force * dy).clamp(-REPULSIVE_FORCE_CLAMP, REPULSIVE_FORCE_CLAMP);
             embedding[i][0] += fx;
             embedding[i][1] += fy;
         }
@@ -908,7 +919,7 @@ impl ClassifyHandle {
 
         // Run UMAP projection and cluster on the projection.
         if features.len() >= 4 {
-            let (projection, umap_assignments) = umap_cluster(&features, 15, 200, k);
+            let (projection, umap_assignments) = umap_cluster(&features, UMAP_N_NEIGHBORS, UMAP_N_EPOCHS, k);
             for (i, r) in s.results.iter_mut().enumerate() {
                 r.umap_x = Some(projection.coords[i][0]);
                 r.umap_y = Some(projection.coords[i][1]);
@@ -1201,7 +1212,7 @@ fn run_classify(
 
                     // Run UMAP projection alongside re-clustering.
                     let (projection, umap_assignments) = if features.len() >= 4 {
-                        let (p, a) = umap_cluster(&features, 15, 100, k);
+                        let (p, a) = umap_cluster(&features, UMAP_N_NEIGHBORS, UMAP_N_EPOCHS_INCREMENTAL, k);
                         (Some(p), Some(a))
                     } else {
                         (None, None)
@@ -1236,7 +1247,7 @@ fn run_classify(
 
             // Final UMAP projection.
             let (projection, umap_assignments) = if features.len() >= 4 {
-                let (p, a) = umap_cluster(&features, 15, 200, k);
+                let (p, a) = umap_cluster(&features, UMAP_N_NEIGHBORS, UMAP_N_EPOCHS, k);
                 (Some(p), Some(a))
             } else {
                 (None, None)
