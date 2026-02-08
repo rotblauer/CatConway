@@ -30,6 +30,10 @@ pub struct UiActions {
     pub load_pattern: Option<usize>,
     pub speed_change: Option<f64>,
     pub apply_resolution: Option<GridResolution>,
+    pub start_search: bool,
+    pub stop_search: bool,
+    pub toggle_search_pause: bool,
+    pub apply_search_result: Option<usize>,
 }
 
 /// Persistent state for the egui overlay UI.
@@ -66,6 +70,22 @@ pub struct PatternInfo {
     pub key: &'static str,
 }
 
+/// Information about the background rule search for UI display.
+pub struct SearchInfo {
+    /// Whether a search handle exists.
+    pub active: bool,
+    /// Whether the search thread is still running.
+    pub running: bool,
+    /// Whether the search is paused.
+    pub paused: bool,
+    /// Total rules examined so far.
+    pub total_examined: usize,
+    /// Total interesting rules found.
+    pub total_interesting: usize,
+    /// Labels of discovered interesting rules.
+    pub result_labels: Vec<String>,
+}
+
 /// Draw the egui overlay UI and return any actions the user triggered.
 pub fn draw_ui(
     ctx: &egui::Context,
@@ -78,6 +98,7 @@ pub fn draw_ui(
     stats: &Stats,
     grid_width: u32,
     grid_height: u32,
+    search_info: &SearchInfo,
 ) -> UiActions {
     let mut actions = UiActions::default();
 
@@ -196,6 +217,69 @@ pub fn draw_ui(
                 ui.label(format!("Population: {pop}"));
                 ui.label(format!("Density: {:.1}%", density * 100.0));
                 ui.label(format!("Gen/sec: {rate:.0}"));
+
+                // ── Rule Search ──
+                ui.separator();
+                ui.heading("Rule Search");
+                if !search_info.active {
+                    if ui.button("🔍 Start Search").clicked() {
+                        actions.start_search = true;
+                    }
+                } else {
+                    let status = if !search_info.running {
+                        "Complete"
+                    } else if search_info.paused {
+                        "⏸ Paused"
+                    } else {
+                        "▶ Running"
+                    };
+                    ui.label(format!("Status: {status}"));
+                    ui.label(format!(
+                        "Rules tested: {}",
+                        search_info.total_examined
+                    ));
+                    ui.label(format!(
+                        "Interesting: {}",
+                        search_info.total_interesting
+                    ));
+
+                    ui.horizontal(|ui| {
+                        if search_info.running {
+                            if search_info.paused {
+                                if ui.button("▶ Resume").clicked() {
+                                    actions.toggle_search_pause = true;
+                                }
+                            } else if ui.button("⏸ Pause").clicked() {
+                                actions.toggle_search_pause = true;
+                            }
+                            if ui.button("⏹ Stop").clicked() {
+                                actions.stop_search = true;
+                            }
+                        } else if ui.button("🔍 New Search").clicked() {
+                            actions.start_search = true;
+                        }
+                    });
+
+                    if !search_info.result_labels.is_empty() {
+                        ui.separator();
+                        ui.label("Discovered Rules:");
+                        egui::ScrollArea::vertical()
+                            .max_height(150.0)
+                            .show(ui, |ui| {
+                                for (idx, label) in
+                                    search_info.result_labels.iter().enumerate()
+                                {
+                                    ui.horizontal(|ui| {
+                                        ui.label(label.as_str());
+                                        if ui.small_button("Apply").clicked() {
+                                            actions.apply_search_result =
+                                                Some(idx);
+                                        }
+                                    });
+                                }
+                            });
+                    }
+                }
             });
     }
 

@@ -15,9 +15,10 @@ use crate::grid::{
     pattern_r_pentomino,
 };
 use crate::renderer::Renderer;
+use crate::search::{self, SearchHandle};
 use crate::simulation::Simulation;
 use crate::stats::{SamplingBridge, Stats, spawn_sampling_thread};
-use crate::ui::{self, PatternInfo, RuleInfo, UiState};
+use crate::ui::{self, PatternInfo, RuleInfo, SearchInfo, UiState};
 
 /// Default grid dimension (square).
 const DEFAULT_GRID_SIZE: u32 = 1024;
@@ -56,6 +57,8 @@ pub struct App {
     _sampling_shutdown: Arc<AtomicBool>,
     /// UI state.
     ui_state: UiState,
+    /// Background rule search handle.
+    search_handle: Option<SearchHandle>,
 }
 
 struct GpuState {
@@ -127,6 +130,7 @@ impl App {
             sampling_bridge,
             _sampling_shutdown: sampling_shutdown,
             ui_state: UiState::new(DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE),
+            search_handle: None,
         }
     }
 
@@ -280,6 +284,28 @@ impl App {
                 .map(|(name, key, _)| PatternInfo { name, key })
                 .collect();
 
+            let search_info = if let Some(ref handle) = self.search_handle {
+                let progress = handle.progress();
+                let results = handle.results();
+                SearchInfo {
+                    active: true,
+                    running: progress.running,
+                    paused: progress.paused,
+                    total_examined: progress.total_examined,
+                    total_interesting: progress.total_interesting,
+                    result_labels: results.iter().map(|r| r.label.clone()).collect(),
+                }
+            } else {
+                SearchInfo {
+                    active: false,
+                    running: false,
+                    paused: false,
+                    total_examined: 0,
+                    total_interesting: 0,
+                    result_labels: Vec::new(),
+                }
+            };
+
             let actions = ui::draw_ui(
                 &gpu.egui_ctx,
                 &mut self.ui_state,
@@ -291,6 +317,7 @@ impl App {
                 &self.stats,
                 self.grid.width,
                 self.grid.height,
+                &search_info,
             );
 
             let egui_output = gpu.egui_ctx.end_pass();
@@ -405,8 +432,12 @@ impl App {
 
             // Update window title with stats
             let generation = gpu.simulation.generation;
-            let rules = rule_sets();
-            let rule_name = rules[self.current_rule_idx].0;
+            let rule_list = rule_sets();
+            let rule_name = if self.current_rule_idx < rule_list.len() {
+                rule_list[self.current_rule_idx].0.to_string()
+            } else {
+                search::rules_to_label(&self.grid.rules)
+            };
             let status = if self.running { "▶" } else { "⏸" };
             gpu.window.set_title(&format!(
                 "CatConway | {status} Gen {generation} | {rule_name} | Speed: {:.1}x | {}×{}",
@@ -472,11 +503,56 @@ impl App {
         if let Some(res) = actions.apply_resolution {
             self.apply_new_resolution(res.width, res.height);
         }
+
+        // ── Rule search actions ──
+        if actions.start_search {
+            if let Some(ref handle) = self.search_handle {
+                handle.stop();
+            }
+            self.search_handle =
+                Some(search::spawn_search(search::SearchConfig::default()));
+            log::info!("Rule search started");
+        }
+        if actions.stop_search {
+            if let Some(ref handle) = self.search_handle {
+                handle.stop();
+            }
+            log::info!("Rule search stopped");
+        }
+        if actions.toggle_search_pause {
+            if let Some(ref handle) = self.search_handle {
+                let progress = handle.progress();
+                if progress.paused {
+                    handle.resume();
+                    log::info!("Rule search resumed");
+                } else {
+                    handle.pause();
+                    log::info!("Rule search paused");
+                }
+            }
+        }
+        if let Some(idx) = actions.apply_search_result {
+            if let Some(ref handle) = self.search_handle {
+                let results = handle.results();
+                if let Some(result) = results.get(idx) {
+                    self.grid.rules = result.rules;
+                    self.current_rule_idx = usize::MAX;
+                    if let Some(ref gpu) = self.gpu {
+                        gpu.simulation
+                            .update_rules(&gpu.queue, self.grid.sim_params());
+                    }
+                    log::info!("Applied search result: {}", result.label);
+                }
+            }
+        }
     }
 
     fn apply_new_resolution(&mut self, width: u32, height: u32) {
         self.grid = Grid::new(width, height);
-        self.grid.rules = rule_sets()[self.current_rule_idx].1;
+        let rule_list = rule_sets();
+        if self.current_rule_idx < rule_list.len() {
+            self.grid.rules = rule_list[self.current_rule_idx].1;
+        }
         self.grid.randomize(INITIAL_DENSITY);
 
         let total = (width as u64) * (height as u64);
@@ -529,6 +605,9 @@ impl App {
             }
             Key::Named(NamedKey::Escape) => {
                 self._sampling_shutdown.store(true, Ordering::Relaxed);
+                if let Some(ref handle) = self.search_handle {
+                    handle.stop();
+                }
                 if let Some(ref gpu) = self.gpu {
                     gpu.window.set_visible(false);
                 }
@@ -624,6 +703,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 self._sampling_shutdown.store(true, Ordering::Relaxed);
+                if let Some(ref handle) = self.search_handle {
+                    handle.stop();
+                }
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {

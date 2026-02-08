@@ -16,6 +16,7 @@ GPU-accelerated Conway's Game of Life with a dynamical systems focus, built in R
   - Glider, R-pentomino, Acorn, Gosper Glider Gun, LWSS
 - **Toroidal Topology**: Grid wraps at edges for true dynamical system behavior
 - **Interactive Exploration**: Pan, zoom, pause, step, and adjust speed in real time
+- **Background Rule Search**: Automatically discover interesting cellular automata rule sets via the GUI — start, pause, resume, and apply discovered rules in real time
 - **Static Binary**: Compiles to a single binary with `cargo build --release`
 
 ## Building
@@ -97,6 +98,9 @@ src/
   renderer.rs    — GPU render pipeline (fullscreen triangle)
   camera.rs      — Camera with pan/zoom for exploration
   grid.rs        — Grid state, rules, and pattern definitions
+  search.rs      — Background rule search (CPU-based auto-discovery)
+  ui.rs          — egui overlay UI (sidebar, stats, rule search controls)
+  stats.rs       — Population statistics and sampling
 shaders/
   compute.wgsl   — WGSL compute shader for simulation
   render.wgsl    — WGSL fragment shader for visualization
@@ -113,3 +117,25 @@ This implementation treats Conway's Game of Life as a discrete dynamical system:
 - **Toroidal boundary conditions** create a closed system suitable for long-term dynamics study
 - **Methuselah patterns** (R-pentomino, Acorn) demonstrate sensitivity to initial conditions
 - **Generation counter** and speed controls enable precise observation of temporal evolution
+
+## Rule Search
+
+CatConway includes a background rule search that automatically generates and evaluates cellular automata rule sets to discover interesting dynamics. The search runs on a separate CPU thread so the GPU simulation remains responsive.
+
+### Using Rule Search from the GUI
+
+1. **Start**: In the left sidebar, scroll to the **Rule Search** section and click **🔍 Start Search**. The search begins iterating over all possible birth/survival rule combinations (radius-1 Moore neighborhood by default).
+2. **Monitor progress**: While running, the sidebar shows:
+   - **Status** — Running, Paused, or Complete
+   - **Rules tested** — total number of rule sets evaluated so far
+   - **Interesting** — how many rule sets passed the interestingness filter
+3. **Pause / Resume**: Click **⏸ Pause** to temporarily halt the search (the thread sleeps until resumed). Click **▶ Resume** to continue where it left off.
+4. **Stop**: Click **⏹ Stop** to terminate the search. You can start a new search at any time.
+5. **Apply a discovered rule**: Interesting rules appear in a scrollable list below the controls. Click **Apply** next to any rule label (e.g., `B36/S23`) to immediately load that rule set into the live GPU simulation. The window title updates to show the active rule.
+
+### How it works
+
+- Each candidate rule set is evaluated by running a short CPU simulation (64×64 grid, 300 generations by default).
+- The search computes the coefficient of variation of the population over time and filters out dead, saturated, or periodic results.
+- Interesting rule sets (those with sufficient variation) are persisted to `search_results.txt`; examined rules are tracked in `search_examined.txt` to avoid re-evaluation across sessions.
+- Results can be loaded into the visualizer via the **Apply** button in the sidebar.
