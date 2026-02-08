@@ -1393,6 +1393,12 @@ fn run_classify(
     /// Number of rules to evaluate in parallel per batch.
     const PARALLEL_BATCH: usize = 64;
 
+    /// Returns true when `count` has crossed a `threshold` boundary compared
+    /// to `count - increment`, i.e. a periodic action should fire.
+    fn crossed_threshold(count: u32, increment: u32, threshold: u32) -> bool {
+        count / threshold != count.saturating_sub(increment) / threshold
+    }
+
     let mut batch_count = 0u32;
 
     // birth=0 means no cells can ever be born → skip entirely.
@@ -1450,9 +1456,10 @@ fn run_classify(
                     .collect();
 
                 // Record and persist all results under a single lock acquisition.
+                let batch_len = new_results.len() as u32;
                 {
                     let mut s = state.lock().unwrap();
-                    for result in &new_results {
+                    for result in new_results {
                         s.examined.insert((
                             result.rules.birth,
                             result.rules.survival,
@@ -1465,18 +1472,16 @@ fn run_classify(
                             result.rules.survival,
                             config.radius,
                         );
-                        append_classified_result(&config.results_path, result);
-                        s.results.push(result.clone());
+                        append_classified_result(&config.results_path, &result);
+                        s.results.push(result);
                     }
                 }
 
-                batch_count += new_results.len() as u32;
+                batch_count += batch_len;
                 candidates.clear();
 
                 // Re-cluster with fast k-means every RECLUSTER_BATCH_SIZE rules.
-                if batch_count / RECLUSTER_BATCH_SIZE
-                    != (batch_count - new_results.len() as u32) / RECLUSTER_BATCH_SIZE
-                {
+                if crossed_threshold(batch_count, batch_len, RECLUSTER_BATCH_SIZE) {
                     let s = state.lock().unwrap();
                     if s.results.len() >= 8 {
                         let features: Vec<[f64; 10]> =
@@ -1496,9 +1501,7 @@ fn run_classify(
 
                 // Spawn UMAP in a background thread less frequently (every
                 // UMAP_BATCH_SIZE rules), and only if no UMAP is already running.
-                if batch_count / UMAP_BATCH_SIZE
-                    != (batch_count - new_results.len() as u32) / UMAP_BATCH_SIZE
-                {
+                if crossed_threshold(batch_count, batch_len, UMAP_BATCH_SIZE) {
                     let k = {
                         let s = state.lock().unwrap();
                         8.min(s.results.len())
@@ -1541,7 +1544,7 @@ fn run_classify(
             .collect();
 
         let mut s = state.lock().unwrap();
-        for result in &new_results {
+        for result in new_results {
             s.examined.insert((
                 result.rules.birth,
                 result.rules.survival,
@@ -1554,8 +1557,8 @@ fn run_classify(
                 result.rules.survival,
                 config.radius,
             );
-            append_classified_result(&config.results_path, result);
-            s.results.push(result.clone());
+            append_classified_result(&config.results_path, &result);
+            s.results.push(result);
         }
     }
 
