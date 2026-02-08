@@ -764,7 +764,7 @@ pub fn umap_project(features: &[[f64; 10]], n_neighbors: usize, n_epochs: usize)
         }
 
         // Repulsive forces: sample negative pairs.
-        let n_neg = (5 * edges.len()).min(n * n);
+        let n_neg = (5 * edges.len()).min(n.saturating_mul(n));
         for _ in 0..n_neg {
             let i = (cheap_rand() * n as f64) as usize % n;
             let j = (cheap_rand() * n as f64) as usize % n;
@@ -914,16 +914,20 @@ impl ClassifyHandle {
         let features: Vec<[f64; 10]> = s.results.iter().map(|r| r.metrics.feature_vector()).collect();
         let assignments = kmeans_cluster(&features, k, 50);
         for (i, r) in s.results.iter_mut().enumerate() {
-            r.cluster = Some(assignments[i]);
+            if i < assignments.len() {
+                r.cluster = Some(assignments[i]);
+            }
         }
 
         // Run UMAP projection and cluster on the projection.
         if features.len() >= 4 {
             let (projection, umap_assignments) = umap_cluster(&features, UMAP_N_NEIGHBORS, UMAP_N_EPOCHS, k);
             for (i, r) in s.results.iter_mut().enumerate() {
-                r.umap_x = Some(projection.coords[i][0]);
-                r.umap_y = Some(projection.coords[i][1]);
-                r.umap_cluster = Some(umap_assignments[i]);
+                if i < projection.coords.len() && i < umap_assignments.len() {
+                    r.umap_x = Some(projection.coords[i][0]);
+                    r.umap_y = Some(projection.coords[i][1]);
+                    r.umap_cluster = Some(umap_assignments[i]);
+                }
             }
         }
     }
@@ -1224,7 +1228,7 @@ fn run_classify(
                             r.cluster = Some(assignments[i]);
                         }
                         if let (Some(proj), Some(ua)) = (&projection, &umap_assignments) {
-                            if i < proj.coords.len() {
+                            if i < proj.coords.len() && i < ua.len() {
                                 r.umap_x = Some(proj.coords[i][0]);
                                 r.umap_y = Some(proj.coords[i][1]);
                                 r.umap_cluster = Some(ua[i]);
@@ -1258,7 +1262,7 @@ fn run_classify(
                     r.cluster = Some(assignments[i]);
                 }
                 if let (Some(proj), Some(ua)) = (&projection, &umap_assignments) {
-                    if i < proj.coords.len() {
+                    if i < proj.coords.len() && i < ua.len() {
                         r.umap_x = Some(proj.coords[i][0]);
                         r.umap_y = Some(proj.coords[i][1]);
                         r.umap_cluster = Some(ua[i]);
