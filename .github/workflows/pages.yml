@@ -1,0 +1,36 @@
+name: Build site
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "favorites.txt"
+      - "scripts/build_site.py"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Generate docs/index.html
+        run: python scripts/build_site.py
+
+      - name: Commit updated site
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/index.html
+          git diff --cached --quiet || git commit -m "Auto-generate docs/index.html from favorites.txt"
+          git push
