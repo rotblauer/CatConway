@@ -9,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use rand::Rng;
+use rayon::prelude::*;
 
 use crate::grid::Rules;
 use crate::search::{cpu_step, parse_rule_label, rules_to_label};
@@ -1389,17 +1390,21 @@ fn run_classify(
     /// Number of newly classified rules between UMAP projections.
     /// UMAP is much more expensive than k-means, so we run it ~5× less often.
     const UMAP_BATCH_SIZE: u32 = 500;
+    /// Number of rules to evaluate in parallel per batch.
+    const PARALLEL_BATCH: usize = 64;
 
     let mut batch_count = 0u32;
 
     // birth=0 means no cells can ever be born → skip entirely.
-    for birth in 1..mask_count {
+    let mut candidates: Vec<(u32, u32)> = Vec::with_capacity(PARALLEL_BATCH);
+
+    'outer: for birth in 1..mask_count {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
         for survival in 0..mask_count {
             if shutdown.load(Ordering::Relaxed) {
-                break;
+                break 'outer;
             }
 
             // Wait while paused.
@@ -1415,72 +1420,142 @@ fn run_classify(
                 }
             }
 
-            let rules = Rules {
-                birth,
-                survival,
-                radius: config.radius,
-            };
+            candidates.push((birth, survival));
 
-            let metrics = compute_metrics(&rules, &config);
-            let behavior = classify(&metrics);
-            let label = rules_to_label(&rules);
+            // Process a batch in parallel once we have enough candidates
+            // (or at the very end of the loop via the flush below).
+            if candidates.len() >= PARALLEL_BATCH {
+                let new_results: Vec<ClassifiedRule> = candidates
+                    .par_iter()
+                    .map(|&(b, s)| {
+                        let rules = Rules {
+                            birth: b,
+                            survival: s,
+                            radius: config.radius,
+                        };
+                        let metrics = compute_metrics(&rules, &config);
+                        let behavior = classify(&metrics);
+                        let label = rules_to_label(&rules);
+                        ClassifiedRule {
+                            rules,
+                            label,
+                            metrics,
+                            behavior,
+                            cluster: None,
+                            umap_x: None,
+                            umap_y: None,
+                            umap_cluster: None,
+                        }
+                    })
+                    .collect();
 
-            let result = ClassifiedRule {
-                rules,
-                label: label.clone(),
-                metrics,
-                behavior,
-                cluster: None,
-                umap_x: None,
-                umap_y: None,
-                umap_cluster: None,
-            };
-
-            // Record and persist.
-            {
-                let mut s = state.lock().unwrap();
-                s.examined.insert((birth, survival, config.radius));
-                s.total_examined += 1;
-                append_examined(&config.examined_path, birth, survival, config.radius);
-                append_classified_result(&config.results_path, &result);
-                s.results.push(result);
-            }
-
-            batch_count += 1;
-
-            // Re-cluster with fast k-means every RECLUSTER_BATCH_SIZE rules.
-            if batch_count % RECLUSTER_BATCH_SIZE == 0 {
-                let s = state.lock().unwrap();
-                if s.results.len() >= 8 {
-                    let features: Vec<[f64; 10]> =
-                        s.results.iter().map(|r| r.metrics.feature_vector()).collect();
-                    drop(s);
-                    let k = 8.min(features.len());
-                    let assignments = kmeans_cluster(&features, k, 30);
-
+                // Record and persist all results under a single lock acquisition.
+                {
                     let mut s = state.lock().unwrap();
-                    for (i, r) in s.results.iter_mut().enumerate() {
-                        if i < assignments.len() {
-                            r.cluster = Some(assignments[i]);
+                    for result in &new_results {
+                        s.examined.insert((
+                            result.rules.birth,
+                            result.rules.survival,
+                            config.radius,
+                        ));
+                        s.total_examined += 1;
+                        append_examined(
+                            &config.examined_path,
+                            result.rules.birth,
+                            result.rules.survival,
+                            config.radius,
+                        );
+                        append_classified_result(&config.results_path, result);
+                        s.results.push(result.clone());
+                    }
+                }
+
+                batch_count += new_results.len() as u32;
+                candidates.clear();
+
+                // Re-cluster with fast k-means every RECLUSTER_BATCH_SIZE rules.
+                if batch_count / RECLUSTER_BATCH_SIZE
+                    != (batch_count - new_results.len() as u32) / RECLUSTER_BATCH_SIZE
+                {
+                    let s = state.lock().unwrap();
+                    if s.results.len() >= 8 {
+                        let features: Vec<[f64; 10]> =
+                            s.results.iter().map(|r| r.metrics.feature_vector()).collect();
+                        drop(s);
+                        let k = 8.min(features.len());
+                        let assignments = kmeans_cluster(&features, k, 30);
+
+                        let mut s = state.lock().unwrap();
+                        for (i, r) in s.results.iter_mut().enumerate() {
+                            if i < assignments.len() {
+                                r.cluster = Some(assignments[i]);
+                            }
                         }
                     }
                 }
-            }
 
-            // Spawn UMAP in a background thread less frequently (every
-            // UMAP_BATCH_SIZE rules), and only if no UMAP is already running.
-            if batch_count % UMAP_BATCH_SIZE == 0 {
-                let k = {
-                    let s = state.lock().unwrap();
-                    8.min(s.results.len())
-                };
-                spawn_umap_background(
-                    &state,
-                    &umap_running,
-                    UMAP_N_EPOCHS_INCREMENTAL,
-                    k,
-                );
+                // Spawn UMAP in a background thread less frequently (every
+                // UMAP_BATCH_SIZE rules), and only if no UMAP is already running.
+                if batch_count / UMAP_BATCH_SIZE
+                    != (batch_count - new_results.len() as u32) / UMAP_BATCH_SIZE
+                {
+                    let k = {
+                        let s = state.lock().unwrap();
+                        8.min(s.results.len())
+                    };
+                    spawn_umap_background(
+                        &state,
+                        &umap_running,
+                        UMAP_N_EPOCHS_INCREMENTAL,
+                        k,
+                    );
+                }
             }
+        }
+    }
+
+    // Flush remaining candidates.
+    if !candidates.is_empty() {
+        let new_results: Vec<ClassifiedRule> = candidates
+            .par_iter()
+            .map(|&(b, s)| {
+                let rules = Rules {
+                    birth: b,
+                    survival: s,
+                    radius: config.radius,
+                };
+                let metrics = compute_metrics(&rules, &config);
+                let behavior = classify(&metrics);
+                let label = rules_to_label(&rules);
+                ClassifiedRule {
+                    rules,
+                    label,
+                    metrics,
+                    behavior,
+                    cluster: None,
+                    umap_x: None,
+                    umap_y: None,
+                    umap_cluster: None,
+                }
+            })
+            .collect();
+
+        let mut s = state.lock().unwrap();
+        for result in &new_results {
+            s.examined.insert((
+                result.rules.birth,
+                result.rules.survival,
+                config.radius,
+            ));
+            s.total_examined += 1;
+            append_examined(
+                &config.examined_path,
+                result.rules.birth,
+                result.rules.survival,
+                config.radius,
+            );
+            append_classified_result(&config.results_path, result);
+            s.results.push(result.clone());
         }
     }
 
@@ -2207,5 +2282,90 @@ mod tests {
         let has_umap = s.results.iter().any(|r| r.umap_x.is_some());
         assert!(has_umap, "Expected UMAP coordinates after background thread");
         assert!(!s.umap_cluster_summaries.is_empty(), "Expected cluster summaries");
+    }
+
+    // ── Config customization ──
+
+    #[test]
+    fn default_classify_config_values() {
+        let config = ClassifyConfig::default();
+        assert_eq!(config.grid_size, 64);
+        assert_eq!(config.generations, 500);
+        assert_eq!(config.burn_in, 200);
+        assert_eq!(config.radius, 1);
+    }
+
+    #[test]
+    fn custom_classify_config_grid_size_and_generations() {
+        let config = ClassifyConfig {
+            grid_size: 32,
+            generations: 100,
+            burn_in: 40,
+            ..ClassifyConfig::default()
+        };
+        assert_eq!(config.grid_size, 32);
+        assert_eq!(config.generations, 100);
+        assert_eq!(config.burn_in, 40);
+    }
+
+    #[test]
+    fn compute_metrics_respects_custom_config() {
+        let rules = Rules::conway();
+        let small_config = ClassifyConfig {
+            grid_size: 16,
+            generations: 50,
+            burn_in: 10,
+            ..ClassifyConfig::default()
+        };
+        // Should run without error with small dimensions.
+        let m = compute_metrics(&rules, &small_config);
+        // mean_density must be in [0, 1].
+        assert!(m.mean_density >= 0.0 && m.mean_density <= 1.0);
+    }
+
+    // ── Parallel classification ──
+
+    #[test]
+    fn spawn_classify_with_custom_config_produces_results() {
+        let results_path =
+            std::env::temp_dir().join("catconway_test_classify_custom_config_results.txt");
+        let examined_path =
+            std::env::temp_dir().join("catconway_test_classify_custom_config_examined.txt");
+        let _ = fs::remove_file(&results_path);
+        let _ = fs::remove_file(&examined_path);
+
+        let config = ClassifyConfig {
+            grid_size: 8,
+            generations: 20,
+            burn_in: 5,
+            results_path: results_path.clone(),
+            examined_path: examined_path.clone(),
+            ..ClassifyConfig::default()
+        };
+
+        let handle = spawn_classify(config);
+
+        // Let it classify some rules.
+        thread::sleep(Duration::from_millis(500));
+        handle.stop();
+        thread::sleep(Duration::from_millis(300));
+
+        let results = handle.results();
+        assert!(
+            !results.is_empty(),
+            "Expected at least one classified rule with custom config"
+        );
+
+        // Verify all results have valid behaviors.
+        for r in &results {
+            assert!(
+                r.metrics.mean_density >= 0.0 && r.metrics.mean_density <= 1.0,
+                "mean_density out of range: {}",
+                r.metrics.mean_density
+            );
+        }
+
+        let _ = fs::remove_file(&results_path);
+        let _ = fs::remove_file(&examined_path);
     }
 }

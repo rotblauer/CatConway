@@ -82,6 +82,10 @@ pub struct UiState {
     pub export_grid_size_str: String,
     /// Editable export generations string.
     pub export_generations_str: String,
+    /// Editable classify grid size string.
+    pub classify_grid_size_str: String,
+    /// Editable classify generations string.
+    pub classify_generations_str: String,
 }
 
 impl UiState {
@@ -99,6 +103,8 @@ impl UiState {
             search_generations_str: "3000".to_string(),
             export_grid_size_str: "640".to_string(),
             export_generations_str: "3000".to_string(),
+            classify_grid_size_str: "64".to_string(),
+            classify_generations_str: "500".to_string(),
         }
     }
 }
@@ -772,6 +778,16 @@ fn draw_classify_section(
     actions: &mut UiActions,
 ) {
     if !info.active {
+        ui.label("Classify Grid Size:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.classify_grid_size_str)
+                .desired_width(80.0),
+        );
+        ui.label("Classify Generations:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.classify_generations_str)
+                .desired_width(80.0),
+        );
         if ui.button("🧬 Start Classification").clicked() {
             actions.start_classify = true;
         }
@@ -901,5 +917,7 @@ mod tests {
         assert_eq!(state.search_generations_str, "3000");
         assert_eq!(state.export_grid_size_str, "640");
         assert_eq!(state.export_generations_str, "3000");
+        assert_eq!(state.classify_grid_size_str, "64");
+        assert_eq!(state.classify_generations_str, "500");
     }
 }

@@ -604,8 +604,15 @@ impl App {
             if let Some(ref handle) = self.classify_handle {
                 handle.stop();
             }
+            let mut classify_config = classify::ClassifyConfig::default();
+            if let Ok(size) = self.ui_state.classify_grid_size_str.parse::<u32>() {
+                classify_config.grid_size = size.max(16);
+            }
+            if let Ok(gens) = self.ui_state.classify_generations_str.parse::<u32>() {
+                classify_config.generations = gens.max(1);
+            }
             self.classify_handle =
-                Some(classify::spawn_classify(classify::ClassifyConfig::default()));
+                Some(classify::spawn_classify(classify_config));
             log::info!("Behavior classification started");
         }
         if actions.stop_classify {
