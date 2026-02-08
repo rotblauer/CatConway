@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use rand::Rng;
 
@@ -61,6 +62,7 @@ pub struct SearchProgress {
     pub total_examined: usize,
     pub total_interesting: usize,
     pub running: bool,
+    pub paused: bool,
 }
 
 /// Shared state for the background search thread.
@@ -76,6 +78,7 @@ struct SearchState {
 pub struct SearchHandle {
     state: Arc<Mutex<SearchState>>,
     shutdown: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
 }
 
 impl SearchHandle {
@@ -86,6 +89,7 @@ impl SearchHandle {
             total_examined: s.total_examined,
             total_interesting: s.total_interesting,
             running: s.running,
+            paused: self.paused.load(Ordering::Relaxed),
         }
     }
 
@@ -97,6 +101,16 @@ impl SearchHandle {
     /// Signal the search thread to stop.
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
+    }
+
+    /// Pause the search thread.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    /// Resume the search thread.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
     }
 }
 
@@ -402,21 +416,28 @@ pub fn spawn_search(config: SearchConfig) -> SearchHandle {
     }));
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
 
     let handle = SearchHandle {
         state: state.clone(),
         shutdown: shutdown.clone(),
+        paused: paused.clone(),
     };
 
     thread::spawn(move || {
-        run_search(state, shutdown, config);
+        run_search(state, shutdown, paused, config);
     });
 
     handle
 }
 
 /// Main search loop executed on its own thread.
-fn run_search(state: Arc<Mutex<SearchState>>, shutdown: Arc<AtomicBool>, config: SearchConfig) {
+fn run_search(
+    state: Arc<Mutex<SearchState>>,
+    shutdown: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    config: SearchConfig,
+) {
     ensure_results_header(&config.results_path);
 
     let max_n = max_neighbors(config.radius);
@@ -430,6 +451,11 @@ fn run_search(state: Arc<Mutex<SearchState>>, shutdown: Arc<AtomicBool>, config:
         for survival in 0..mask_count {
             if shutdown.load(Ordering::Relaxed) {
                 break;
+            }
+
+            // Wait while paused.
+            while paused.load(Ordering::Relaxed) && !shutdown.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(100));
             }
 
             // Skip already examined.
@@ -678,5 +704,44 @@ mod tests {
     #[test]
     fn max_neighbors_radius_2() {
         assert_eq!(max_neighbors(2), 24);
+    }
+
+    #[test]
+    fn search_handle_pause_resume() {
+        let results_path = std::env::temp_dir().join("catconway_test_pause_results.txt");
+        let examined_path = std::env::temp_dir().join("catconway_test_pause_examined.txt");
+        let _ = fs::remove_file(&results_path);
+        let _ = fs::remove_file(&examined_path);
+
+        let config = SearchConfig {
+            grid_size: 8,
+            generations: 10,
+            results_path: results_path.clone(),
+            examined_path: examined_path.clone(),
+            ..SearchConfig::default()
+        };
+
+        let handle = spawn_search(config);
+
+        // Initially not paused and running.
+        let p = handle.progress();
+        assert!(!p.paused);
+        assert!(p.running);
+
+        // Pause.
+        handle.pause();
+        assert!(handle.progress().paused);
+
+        // Resume.
+        handle.resume();
+        assert!(!handle.progress().paused);
+
+        // Stop and wait for thread to finish.
+        handle.stop();
+        thread::sleep(Duration::from_millis(300));
+        assert!(!handle.progress().running);
+
+        let _ = fs::remove_file(&results_path);
+        let _ = fs::remove_file(&examined_path);
     }
 }
