@@ -1108,11 +1108,12 @@ fn max_neighbors(radius: u32) -> u32 {
 /// radius. Results are grouped by behavior class.
 pub fn spawn_classify(config: ClassifyConfig) -> ClassifyHandle {
     let examined = load_examined(&config.examined_path);
+    let prior_results = load_classified_results(&config.results_path);
 
     let state = Arc::new(Mutex::new(ClassifyState {
         total_examined: examined.len(),
         examined,
-        results: Vec::new(),
+        results: prior_results,
         running: true,
     }));
 
@@ -1644,6 +1645,68 @@ mod tests {
         handle.stop();
         thread::sleep(Duration::from_millis(300));
         assert!(!handle.progress().running);
+
+        let _ = fs::remove_file(&results_path);
+        let _ = fs::remove_file(&examined_path);
+    }
+
+    #[test]
+    fn spawn_classify_loads_prior_results() {
+        let results_path =
+            std::env::temp_dir().join("catconway_test_classify_spawn_prior_results.txt");
+        let examined_path =
+            std::env::temp_dir().join("catconway_test_classify_spawn_prior_examined.txt");
+        let _ = fs::remove_file(&results_path);
+        let _ = fs::remove_file(&examined_path);
+
+        // Write a prior classified result to disk.
+        ensure_header(&results_path);
+        let result = ClassifiedRule {
+            rules: Rules::conway(),
+            label: "B3/S23".into(),
+            metrics: RuleMetrics {
+                variation: 0.12,
+                mean_density: 0.03,
+                final_density: 0.03,
+                density_range: 0.01,
+                trend: 0.0001,
+                autocorrelation: 0.5,
+                entropy: 1.5,
+                dominant_period: 0,
+                monotonic_fraction: 0.4,
+                roughness: 0.005,
+            },
+            behavior: BehaviorClass::Complex,
+            cluster: None,
+            umap_x: None,
+            umap_y: None,
+            umap_cluster: None,
+        };
+        append_classified_result(&results_path, &result);
+
+        // Spawn classification — it should load the prior result.
+        let config = ClassifyConfig {
+            grid_size: 8,
+            generations: 20,
+            burn_in: 10,
+            results_path: results_path.clone(),
+            examined_path: examined_path.clone(),
+            ..ClassifyConfig::default()
+        };
+
+        let handle = spawn_classify(config);
+
+        // Prior results should be visible immediately.
+        let results = handle.results();
+        assert_eq!(results.len(), 1, "expected 1 prior result loaded");
+        assert_eq!(results[0].label, "B3/S23");
+        assert_eq!(results[0].behavior, BehaviorClass::Complex);
+
+        let progress = handle.progress();
+        assert_eq!(progress.classified_count, 1);
+
+        handle.stop();
+        thread::sleep(Duration::from_millis(300));
 
         let _ = fs::remove_file(&results_path);
         let _ = fs::remove_file(&examined_path);
