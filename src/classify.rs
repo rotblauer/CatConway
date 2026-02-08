@@ -679,11 +679,7 @@ fn compute_damage_spreading(
     }
 
     // Return mean normalized Hamming distance.
-    if distances.is_empty() {
-        0.0
-    } else {
-        distances.iter().sum::<f64>() / distances.len() as f64
-    }
+    distances.iter().sum::<f64>() / distances.len() as f64
 }
 
 // ── Simple k-means clustering ───────────────────────────────────────────────
@@ -857,7 +853,7 @@ pub struct UmapProjection {
     pub coords: Vec<[f64; 2]>,
 }
 
-/// Run UMAP on high-dimensional feature vectors, returning a 2D projection.
+/// Run UMAP on `NUM_FEATURES`-dimensional feature vectors, returning a 2D projection.
 ///
 /// This is a simplified implementation of UMAP (Uniform Manifold Approximation
 /// and Projection) suitable for interactive visualization. It constructs a
