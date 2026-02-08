@@ -167,7 +167,14 @@ fn evaluate_rules(rules: &Rules, config: &SearchConfig) -> (f64, u64) {
 
     let mut populations: Vec<u64> = Vec::with_capacity(config.generations as usize);
 
-    for _ in 0..config.generations {
+    // Collect grid states from the tail of the simulation so we can detect
+    // cell-level periodicity (e.g. complement/mirror-image oscillations)
+    // that population-count analysis alone would miss.
+    let tail_len = (2 * config.max_period + 1) as u32;
+    let tail_start = config.generations.saturating_sub(tail_len);
+    let mut tail_states: Vec<Vec<u32>> = Vec::new();
+
+    for step in 0..config.generations {
         let pop: u64 = cells.iter().map(|&c| u64::from(c)).sum();
         populations.push(pop);
 
@@ -177,6 +184,17 @@ fn evaluate_rules(rules: &Rules, config: &SearchConfig) -> (f64, u64) {
         }
 
         cells = cpu_step(&cells, size, size, rules);
+
+        if step >= tail_start {
+            tail_states.push(cells.clone());
+        }
+    }
+
+    // Reject if the actual cell states are periodic — catches grid-level cycles
+    // that population-count analysis misses, such as complement oscillations
+    // where alive↔dead flips produce similar population counts each generation.
+    if is_grid_periodic(&tail_states, config.max_period) {
+        return (0.0, 0);
     }
 
     let variation = compute_variation(&populations, total as u64, config.max_period);
@@ -225,6 +243,22 @@ fn is_periodic(data: &[u64], max_period: usize) -> bool {
         // Checking w[0] == w[period] therefore verifies data[i] == data[i+period]
         // across the entire slice, which is the definition of period-P repetition.
         let periodic = data.windows(period + 1).all(|w| w[0] == w[period]);
+        if periodic {
+            return true;
+        }
+    }
+    false
+}
+
+/// Return `true` if the sequence of grid states contains a repeating cycle
+/// with period ≤ `max_period`.  This catches cell-level oscillations (e.g.
+/// complement / mirror-image cycles) that population-count periodicity misses.
+fn is_grid_periodic(states: &[Vec<u32>], max_period: usize) -> bool {
+    if states.len() < 2 {
+        return false;
+    }
+    for period in 1..=max_period.min(states.len() / 2) {
+        let periodic = states.windows(period + 1).all(|w| w[0] == w[period]);
         if periodic {
             return true;
         }
@@ -585,6 +619,45 @@ mod tests {
     fn non_periodic_returns_false() {
         let data: Vec<u64> = (0..50).map(|i| i * i).collect();
         assert!(!is_periodic(&data, 20));
+    }
+
+    // ── Grid-state periodicity detection ──
+
+    #[test]
+    fn grid_periodic_detects_static() {
+        let state = vec![1u32, 0, 1, 0];
+        let states = vec![state.clone(); 6];
+        assert!(is_grid_periodic(&states, 20));
+    }
+
+    #[test]
+    fn grid_periodic_detects_period_two() {
+        let a = vec![1u32, 0, 1, 0];
+        let b = vec![0u32, 1, 0, 1];
+        let states = vec![a.clone(), b.clone(), a.clone(), b.clone(), a.clone(), b.clone()];
+        assert!(is_grid_periodic(&states, 20));
+    }
+
+    #[test]
+    fn grid_periodic_complement_same_population() {
+        // Two states with identical population but different cell layouts — a
+        // complement-style oscillation that population-count checks miss.
+        let a = vec![1u32, 1, 0, 0];
+        let b = vec![0u32, 0, 1, 1];
+        let states = vec![a.clone(), b.clone(), a.clone(), b.clone(), a.clone(), b.clone()];
+        assert!(is_grid_periodic(&states, 20));
+    }
+
+    #[test]
+    fn grid_periodic_non_periodic_returns_false() {
+        let states: Vec<Vec<u32>> = (0..10).map(|i| vec![i, i + 1, i * 2, i * 3]).collect();
+        assert!(!is_grid_periodic(&states, 20));
+    }
+
+    #[test]
+    fn grid_periodic_too_short_returns_false() {
+        let state = vec![1u32, 0];
+        assert!(!is_grid_periodic(&[state], 20));
     }
 
     // ── Variation metric ──
