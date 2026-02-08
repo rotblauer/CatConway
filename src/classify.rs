@@ -230,6 +230,11 @@ pub struct ClassifiedRule {
     pub behavior: BehaviorClass,
     /// Cluster index assigned by k-means (if clustering has run).
     pub cluster: Option<usize>,
+    /// UMAP 2D projection coordinates.
+    pub umap_x: Option<f64>,
+    pub umap_y: Option<f64>,
+    /// Cluster index assigned by k-means on the UMAP projection.
+    pub umap_cluster: Option<usize>,
 }
 
 /// Evaluate a rule set: run simulation and compute behavioral metrics.
@@ -609,6 +614,224 @@ fn normalize_features(features: &[[f64; 10]]) -> (Vec<[f64; 10]>, [f64; 10], [f6
     (normalized, means, stddevs)
 }
 
+// ── UMAP dimensionality reduction ───────────────────────────────────────────
+
+/// Result of a UMAP projection: 2D coordinates for each input point.
+#[derive(Debug, Clone)]
+pub struct UmapProjection {
+    /// 2D coordinates for each input point.
+    pub coords: Vec<[f64; 2]>,
+}
+
+/// Run UMAP on 10-dimensional feature vectors, returning a 2D projection.
+///
+/// This is a simplified implementation of UMAP (Uniform Manifold Approximation
+/// and Projection) suitable for interactive visualization. It constructs a
+/// fuzzy k-nearest-neighbor graph in high-dimensional space and optimizes a
+/// low-dimensional embedding using stochastic gradient descent with
+/// attractive/repulsive forces.
+pub fn umap_project(features: &[[f64; 10]], n_neighbors: usize, n_epochs: usize) -> UmapProjection {
+    let n = features.len();
+    if n < 2 {
+        return UmapProjection {
+            coords: features.iter().map(|_| [0.0, 0.0]).collect(),
+        };
+    }
+
+    let k = n_neighbors.min(n - 1).max(1);
+
+    // Normalize features before computing distances.
+    let (normalized, _means, _stddevs) = normalize_features(features);
+
+    // Step 1: Compute pairwise distances.
+    let mut dists = vec![vec![0.0f64; n]; n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let d = squared_dist(&normalized[i], &normalized[j]).sqrt();
+            dists[i][j] = d;
+            dists[j][i] = d;
+        }
+    }
+
+    // Step 2: For each point, find k nearest neighbors and compute fuzzy
+    //         membership strengths using local bandwidth (sigma).
+    let mut knn: Vec<Vec<(usize, f64)>> = Vec::with_capacity(n);
+    let mut memberships = vec![vec![0.0f64; n]; n];
+
+    for i in 0..n {
+        let mut neighbors: Vec<(usize, f64)> = (0..n)
+            .filter(|&j| j != i)
+            .map(|j| (j, dists[i][j]))
+            .collect();
+        neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        neighbors.truncate(k);
+
+        let rho = neighbors.first().map(|&(_, d)| d).unwrap_or(0.0);
+
+        // Binary search for sigma such that sum of exp(-(d - rho)/sigma) ≈ log2(k).
+        let target = (k as f64).ln() / std::f64::consts::LN_2;
+        let sigma = find_sigma(&neighbors, rho, target);
+
+        for &(j, d) in &neighbors {
+            let val = if d <= rho {
+                1.0
+            } else {
+                (-(d - rho) / sigma).exp()
+            };
+            memberships[i][j] = val;
+        }
+
+        knn.push(neighbors);
+    }
+
+    // Step 3: Symmetrize memberships: p = p_ij + p_ji - p_ij * p_ji.
+    let mut graph = vec![vec![0.0f64; n]; n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let p = memberships[i][j];
+            let q = memberships[j][i];
+            let sym = p + q - p * q;
+            graph[i][j] = sym;
+            graph[j][i] = sym;
+        }
+    }
+
+    // Collect edges with weights for SGD optimization.
+    let mut edges: Vec<(usize, usize, f64)> = Vec::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if graph[i][j] > 1e-10 {
+                edges.push((i, j, graph[i][j]));
+            }
+        }
+    }
+
+    // Step 4: Initialize 2D embedding with small random values seeded
+    //         deterministically for reproducibility.
+    let mut embedding: Vec<[f64; 2]> = Vec::with_capacity(n);
+    {
+        // Simple deterministic initialization: place points on a circle
+        // scaled by a spectral-like heuristic, then perturb slightly.
+        let scale = 10.0;
+        for i in 0..n {
+            let angle = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+            // Mix in feature information for better initialization.
+            let r = scale * (0.5 + 0.5 * normalized[i][0].abs().min(1.0));
+            embedding.push([r * angle.cos(), r * angle.sin()]);
+        }
+    }
+
+    // Step 5: Optimize embedding with SGD.
+    let a = 1.0;
+    let b = 1.0;
+    let initial_lr = 1.0;
+
+    let mut rng_state: u64 = 42;
+    let mut cheap_rand = || -> f64 {
+        // xorshift64
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        (rng_state as f64) / (u64::MAX as f64)
+    };
+
+    for epoch in 0..n_epochs {
+        let lr = initial_lr * (1.0 - epoch as f64 / n_epochs as f64).max(0.001);
+
+        // Attractive forces along edges.
+        for &(i, j, w) in &edges {
+            let dx = embedding[i][0] - embedding[j][0];
+            let dy = embedding[i][1] - embedding[j][1];
+            let dist_sq = dx * dx + dy * dy + 1e-10;
+            let grad = -2.0 * a * b * dist_sq.powf(b - 1.0) / (1.0 + a * dist_sq.powf(b));
+            let force = w * grad * lr;
+            embedding[i][0] += force * dx;
+            embedding[i][1] += force * dy;
+            embedding[j][0] -= force * dx;
+            embedding[j][1] -= force * dy;
+        }
+
+        // Repulsive forces: sample negative pairs.
+        let n_neg = (5 * edges.len()).min(n * n);
+        for _ in 0..n_neg {
+            let i = (cheap_rand() * n as f64) as usize % n;
+            let j = (cheap_rand() * n as f64) as usize % n;
+            if i == j || graph[i][j] > 1e-10 {
+                continue;
+            }
+            let dx = embedding[i][0] - embedding[j][0];
+            let dy = embedding[i][1] - embedding[j][1];
+            let dist_sq = dx * dx + dy * dy + 1e-10;
+            let grad = 2.0 * b / ((0.001 + dist_sq) * (1.0 + a * dist_sq.powf(b)));
+            let force = grad * lr;
+            let clamp = 4.0;
+            let fx = (force * dx).clamp(-clamp, clamp);
+            let fy = (force * dy).clamp(-clamp, clamp);
+            embedding[i][0] += fx;
+            embedding[i][1] += fy;
+        }
+    }
+
+    UmapProjection { coords: embedding }
+}
+
+/// Binary search for the local bandwidth sigma such that the sum of
+/// membership strengths approximates the target (log2(k)).
+fn find_sigma(neighbors: &[(usize, f64)], rho: f64, target: f64) -> f64 {
+    let mut lo = 1e-10_f64;
+    let mut hi = 100.0_f64;
+
+    for _ in 0..64 {
+        let mid = (lo + hi) / 2.0;
+        let sum: f64 = neighbors
+            .iter()
+            .map(|&(_, d)| {
+                if d <= rho {
+                    1.0
+                } else {
+                    (-(d - rho) / mid).exp()
+                }
+            })
+            .sum();
+        if sum > target {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+
+    (lo + hi) / 2.0
+}
+
+/// Run UMAP projection and then k-means on the 2D projection to produce
+/// agnostic cluster assignments. Returns (projection, cluster_assignments).
+pub fn umap_cluster(
+    features: &[[f64; 10]],
+    n_neighbors: usize,
+    n_epochs: usize,
+    k: usize,
+) -> (UmapProjection, Vec<usize>) {
+    let projection = umap_project(features, n_neighbors, n_epochs);
+    if projection.coords.len() < 2 {
+        return (projection, vec![0; features.len()]);
+    }
+
+    // Convert 2D coords to [f64; 10] for reuse of kmeans_cluster (pad with zeros).
+    let padded: Vec<[f64; 10]> = projection
+        .coords
+        .iter()
+        .map(|&[x, y]| {
+            let mut v = [0.0f64; 10];
+            v[0] = x;
+            v[1] = y;
+            v
+        })
+        .collect();
+
+    let assignments = kmeans_cluster(&padded, k, 50);
+    (projection, assignments)
+}
+
 // ── Background classification thread ────────────────────────────────────────
 
 /// Progress snapshot of the classification search.
@@ -671,7 +894,7 @@ impl ClassifyHandle {
             .collect()
     }
 
-    /// Re-cluster all results using k-means with the given k.
+    /// Re-cluster all results using k-means with the given k, and update UMAP projection.
     pub fn recluster(&self, k: usize) {
         let mut s = self.state.lock().unwrap();
         if s.results.is_empty() {
@@ -681,6 +904,16 @@ impl ClassifyHandle {
         let assignments = kmeans_cluster(&features, k, 50);
         for (i, r) in s.results.iter_mut().enumerate() {
             r.cluster = Some(assignments[i]);
+        }
+
+        // Run UMAP projection and cluster on the projection.
+        if features.len() >= 4 {
+            let (projection, umap_assignments) = umap_cluster(&features, 15, 200, k);
+            for (i, r) in s.results.iter_mut().enumerate() {
+                r.umap_x = Some(projection.coords[i][0]);
+                r.umap_y = Some(projection.coords[i][1]);
+                r.umap_cluster = Some(umap_assignments[i]);
+            }
         }
     }
 
@@ -842,6 +1075,9 @@ fn parse_classified_line(line: &str) -> Option<ClassifiedRule> {
         },
         behavior: class,
         cluster: None,
+        umap_x: None,
+        umap_y: None,
+        umap_cluster: None,
     })
 }
 
@@ -936,6 +1172,9 @@ fn run_classify(
                 metrics,
                 behavior,
                 cluster: None,
+                umap_x: None,
+                umap_y: None,
+                umap_cluster: None,
             };
 
             // Record and persist.
@@ -959,10 +1198,26 @@ fn run_classify(
                     drop(s);
                     let k = 8.min(features.len());
                     let assignments = kmeans_cluster(&features, k, 30);
+
+                    // Run UMAP projection alongside re-clustering.
+                    let (projection, umap_assignments) = if features.len() >= 4 {
+                        let (p, a) = umap_cluster(&features, 15, 100, k);
+                        (Some(p), Some(a))
+                    } else {
+                        (None, None)
+                    };
+
                     let mut s = state.lock().unwrap();
                     for (i, r) in s.results.iter_mut().enumerate() {
                         if i < assignments.len() {
                             r.cluster = Some(assignments[i]);
+                        }
+                        if let (Some(proj), Some(ua)) = (&projection, &umap_assignments) {
+                            if i < proj.coords.len() {
+                                r.umap_x = Some(proj.coords[i][0]);
+                                r.umap_y = Some(proj.coords[i][1]);
+                                r.umap_cluster = Some(ua[i]);
+                            }
                         }
                     }
                 }
@@ -978,9 +1233,25 @@ fn run_classify(
                 s.results.iter().map(|r| r.metrics.feature_vector()).collect();
             let k = 8.min(features.len());
             let assignments = kmeans_cluster(&features, k, 50);
+
+            // Final UMAP projection.
+            let (projection, umap_assignments) = if features.len() >= 4 {
+                let (p, a) = umap_cluster(&features, 15, 200, k);
+                (Some(p), Some(a))
+            } else {
+                (None, None)
+            };
+
             for (i, r) in s.results.iter_mut().enumerate() {
                 if i < assignments.len() {
                     r.cluster = Some(assignments[i]);
+                }
+                if let (Some(proj), Some(ua)) = (&projection, &umap_assignments) {
+                    if i < proj.coords.len() {
+                        r.umap_x = Some(proj.coords[i][0]);
+                        r.umap_y = Some(proj.coords[i][1]);
+                        r.umap_cluster = Some(ua[i]);
+                    }
                 }
             }
         }
@@ -1275,6 +1546,9 @@ mod tests {
             },
             behavior: BehaviorClass::Complex,
             cluster: None,
+            umap_x: None,
+            umap_y: None,
+            umap_cluster: None,
         };
         append_classified_result(&dir, &result);
 
@@ -1398,5 +1672,77 @@ mod tests {
                 || class == BehaviorClass::Explosive,
             "Unexpected class: {class}"
         );
+    }
+
+    // ── UMAP ──
+
+    #[test]
+    fn umap_single_point_returns_origin() {
+        let features = vec![[1.0; 10]];
+        let proj = umap_project(&features, 5, 50);
+        assert_eq!(proj.coords.len(), 1);
+        assert_eq!(proj.coords[0], [0.0, 0.0]);
+    }
+
+    #[test]
+    fn umap_empty_returns_empty() {
+        let features: Vec<[f64; 10]> = vec![];
+        let proj = umap_project(&features, 5, 50);
+        assert!(proj.coords.is_empty());
+    }
+
+    #[test]
+    fn umap_two_clusters_separated() {
+        let mut features = Vec::new();
+        // Cluster A: near 0.
+        for _ in 0..10 {
+            features.push([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+        // Cluster B: near 10.
+        for _ in 0..10 {
+            features.push([10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]);
+        }
+        let proj = umap_project(&features, 5, 200);
+        assert_eq!(proj.coords.len(), 20);
+
+        // Verify two clusters are spatially separated in the projection.
+        let centroid_a = [
+            proj.coords[0..10].iter().map(|c| c[0]).sum::<f64>() / 10.0,
+            proj.coords[0..10].iter().map(|c| c[1]).sum::<f64>() / 10.0,
+        ];
+        let centroid_b = [
+            proj.coords[10..20].iter().map(|c| c[0]).sum::<f64>() / 10.0,
+            proj.coords[10..20].iter().map(|c| c[1]).sum::<f64>() / 10.0,
+        ];
+        let dist = ((centroid_a[0] - centroid_b[0]).powi(2)
+            + (centroid_a[1] - centroid_b[1]).powi(2))
+        .sqrt();
+        assert!(
+            dist > 0.1,
+            "Expected separated clusters, got distance {dist}"
+        );
+    }
+
+    #[test]
+    fn umap_cluster_assigns_all_points() {
+        let mut features = Vec::new();
+        for i in 0..20 {
+            let v = i as f64;
+            features.push([v, v, v, v, v, v, v, v, v, v]);
+        }
+        let (proj, assignments) = umap_cluster(&features, 5, 100, 3);
+        assert_eq!(proj.coords.len(), 20);
+        assert_eq!(assignments.len(), 20);
+        // All assignments should be in range [0, 3).
+        assert!(assignments.iter().all(|&a| a < 3));
+    }
+
+    #[test]
+    fn find_sigma_converges() {
+        let neighbors = vec![(1, 1.0), (2, 2.0), (3, 3.0)];
+        let target = (3.0_f64).ln() / std::f64::consts::LN_2;
+        let sigma = find_sigma(&neighbors, 0.5, target);
+        assert!(sigma > 0.0);
+        assert!(sigma.is_finite());
     }
 }
