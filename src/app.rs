@@ -10,6 +10,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::camera::Camera;
+use crate::classify::{self, ClassifyHandle};
 use crate::grid::{
     Grid, Rules, pattern_acorn, pattern_glider, pattern_gosper_gun, pattern_lwss,
     pattern_r_pentomino,
@@ -18,7 +19,7 @@ use crate::renderer::Renderer;
 use crate::search::{self, SearchHandle};
 use crate::simulation::Simulation;
 use crate::stats::{SamplingBridge, Stats, spawn_sampling_thread};
-use crate::ui::{self, PatternInfo, RuleInfo, SearchInfo, UiState};
+use crate::ui::{self, ClassifyInfo, PatternInfo, RuleInfo, SearchInfo, UiState};
 
 /// Default grid dimension (square).
 const DEFAULT_GRID_SIZE: u32 = 1024;
@@ -59,6 +60,8 @@ pub struct App {
     ui_state: UiState,
     /// Background rule search handle.
     search_handle: Option<SearchHandle>,
+    /// Background behavior classification handle.
+    classify_handle: Option<ClassifyHandle>,
 }
 
 struct GpuState {
@@ -131,6 +134,7 @@ impl App {
             _sampling_shutdown: sampling_shutdown,
             ui_state: UiState::new(DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE),
             search_handle: None,
+            classify_handle: None,
         }
     }
 
@@ -306,6 +310,30 @@ impl App {
                 }
             };
 
+            let classify_info = if let Some(ref handle) = self.classify_handle {
+                let progress = handle.progress();
+                let results = handle.results();
+                ClassifyInfo {
+                    active: true,
+                    running: progress.running,
+                    paused: progress.paused,
+                    total_examined: progress.total_examined,
+                    classified_count: progress.classified_count,
+                    class_counts: progress.class_counts,
+                    results,
+                }
+            } else {
+                ClassifyInfo {
+                    active: false,
+                    running: false,
+                    paused: false,
+                    total_examined: 0,
+                    classified_count: 0,
+                    class_counts: std::collections::HashMap::new(),
+                    results: Vec::new(),
+                }
+            };
+
             let actions = ui::draw_ui(
                 &gpu.egui_ctx,
                 &mut self.ui_state,
@@ -318,6 +346,7 @@ impl App {
                 self.grid.width,
                 self.grid.height,
                 &search_info,
+                &classify_info,
             );
 
             let egui_output = gpu.egui_ctx.end_pass();
@@ -545,6 +574,58 @@ impl App {
                 }
             }
         }
+
+        // ── Classification actions ──
+        if actions.start_classify {
+            if let Some(ref handle) = self.classify_handle {
+                handle.stop();
+            }
+            self.classify_handle =
+                Some(classify::spawn_classify(classify::ClassifyConfig::default()));
+            log::info!("Behavior classification started");
+        }
+        if actions.stop_classify {
+            if let Some(ref handle) = self.classify_handle {
+                handle.stop();
+            }
+            log::info!("Behavior classification stopped");
+        }
+        if actions.toggle_classify_pause {
+            if let Some(ref handle) = self.classify_handle {
+                let progress = handle.progress();
+                if progress.paused {
+                    handle.resume();
+                    log::info!("Behavior classification resumed");
+                } else {
+                    handle.pause();
+                    log::info!("Behavior classification paused");
+                }
+            }
+        }
+        if let Some(idx) = actions.apply_classified_rule {
+            if let Some(ref handle) = self.classify_handle {
+                let results = handle.results();
+                if let Some(result) = results.get(idx) {
+                    self.grid.rules = result.rules;
+                    self.current_rule_idx = usize::MAX;
+                    if let Some(ref gpu) = self.gpu {
+                        gpu.simulation
+                            .update_rules(&gpu.queue, self.grid.sim_params());
+                    }
+                    log::info!(
+                        "Applied classified rule: {} [{}]",
+                        result.label,
+                        result.behavior
+                    );
+                }
+            }
+        }
+        if let Some(k) = actions.recluster {
+            if let Some(ref handle) = self.classify_handle {
+                handle.recluster(k);
+                log::info!("Re-clustered with k={k}");
+            }
+        }
     }
 
     fn apply_new_resolution(&mut self, width: u32, height: u32) {
@@ -606,6 +687,9 @@ impl App {
             Key::Named(NamedKey::Escape) => {
                 self._sampling_shutdown.store(true, Ordering::Relaxed);
                 if let Some(ref handle) = self.search_handle {
+                    handle.stop();
+                }
+                if let Some(ref handle) = self.classify_handle {
                     handle.stop();
                 }
                 if let Some(ref gpu) = self.gpu {
@@ -708,6 +792,9 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 self._sampling_shutdown.store(true, Ordering::Relaxed);
                 if let Some(ref handle) = self.search_handle {
+                    handle.stop();
+                }
+                if let Some(ref handle) = self.classify_handle {
                     handle.stop();
                 }
                 event_loop.exit();
