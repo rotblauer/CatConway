@@ -1,0 +1,4 @@
+# CatConway Favorite Rules
+# Format: B<birth>/S<survival>[/R<radius>]
+# These rules have been manually marked as interesting.
+B0146/S012
