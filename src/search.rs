@@ -207,11 +207,10 @@ fn compute_variation(populations: &[u64], total_cells: u64, max_period: usize) -
 /// Return `true` if `data` is periodic with period ≤ `max_period`.
 fn is_periodic(data: &[u64], max_period: usize) -> bool {
     for period in 1..=max_period.min(data.len() / 2) {
-        let periodic = data
-            .windows(period + 1)
-            .all(|w| w[0] == w[period]);
-        // ^ checks that every element equals the element `period` steps later,
-        //   which is true iff the sequence has that period (or a divisor of it).
+        // windows(period + 1) yields [data[i]..=data[i+period]] for every i.
+        // Checking w[0] == w[period] therefore verifies data[i] == data[i+period]
+        // across the entire slice, which is the definition of period-P repetition.
+        let periodic = data.windows(period + 1).all(|w| w[0] == w[period]);
         if periodic {
             return true;
         }
@@ -276,6 +275,9 @@ pub fn parse_rule_label(label: &str) -> Option<Rules> {
     })
 }
 
+/// Maximum neighbor count for the largest supported radius (radius 2 = 24).
+const MAX_NEIGHBOR_COUNT: u32 = 24;
+
 /// Parse comma-separated or plain digit strings into a bitmask.
 fn parse_neighbor_digits(s: &str) -> Option<u32> {
     if s.is_empty() {
@@ -286,7 +288,7 @@ fn parse_neighbor_digits(s: &str) -> Option<u32> {
     if s.contains(',') {
         for part in s.split(',') {
             let n: u32 = part.parse().ok()?;
-            if n > 24 {
+            if n > MAX_NEIGHBOR_COUNT {
                 return None;
             }
             mask |= 1 << n;
@@ -420,11 +422,11 @@ fn run_search(state: Arc<Mutex<SearchState>>, shutdown: Arc<AtomicBool>, config:
     let max_n = max_neighbors(config.radius);
     let mask_count = 1u32 << (max_n + 1);
 
+    // birth=0 means no cells can ever be born → skip entirely.
     for birth in 1..mask_count {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
-        // No birth bits → nothing can ever come alive → skip.
         for survival in 0..mask_count {
             if shutdown.load(Ordering::Relaxed) {
                 break;
