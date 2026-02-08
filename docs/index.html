@@ -15,6 +15,9 @@ header h1 span{color:var(--highlight)}
 .controls label{font-size:.75rem;color:var(--muted)}
 select,button,input[type=range]{font-size:.8rem;background:var(--accent);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;cursor:pointer;outline:none}
 select{max-width:220px}
+input[type=text]{font-size:.8rem;background:var(--accent);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;outline:none;font-family:monospace;width:160px}
+input[type=text]:focus{border-color:var(--highlight)}
+input[type=text].invalid{border-color:#c0392b;background:#2c1a1a}
 button:hover{background:var(--highlight)}
 button.active{background:var(--highlight)}
 input[type=range]{width:80px;padding:0;vertical-align:middle}
@@ -37,6 +40,11 @@ canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
   <div class="controls">
     <label>Rule:</label>
     <select id="rule-select"></select>
+  </div>
+  <div class="controls">
+    <label>Custom:</label>
+    <input type="text" id="custom-rule" placeholder="B3/S23 or B3-5/S4-8/R2" spellcheck="false" aria-label="Custom rule entry">
+    <button id="btn-apply" class="tooltip" data-tip="Enter" aria-label="Apply custom rule">Apply</button>
   </div>
   <div class="sep"></div>
 
@@ -91,17 +99,8 @@ canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
 // ── Rule Definitions ──────────────────────────────────────────────
 const RULES = [
   // Favorites from favorites.txt
-  {name:"⭐ B0146/S012 (Favorite)",    birth:[0,1,4,6],       survival:[0,1,2],          radius:1},
-  {name:"⭐ B013456/S234 (Favorite)",   birth:[0,1,3,4,5,6],  survival:[2,3,4],          radius:1},
-  // Built-in rules
-  {name:"Conway (B3/S23)",              birth:[3],             survival:[2,3],            radius:1},
-  {name:"HighLife (B36/S23)",           birth:[3,6],           survival:[2,3],            radius:1},
-  {name:"Day & Night (B3678/S34678)",   birth:[3,6,7,8],      survival:[3,4,6,7,8],      radius:1},
-  {name:"Seeds (B2/S)",                 birth:[2],             survival:[],               radius:1},
-  {name:"Life w/o Death (B3/S012345678)",birth:[3],            survival:[0,1,2,3,4,5,6,7,8],radius:1},
-  {name:"Bugs (B3-5/S4-8/R2)",         birth:[3,4,5],         survival:[4,5,6,7,8],      radius:2},
-  {name:"Globe (B7-11/S7-11/R2)",      birth:[7,8,9,10,11],   survival:[7,8,9,10,11],    radius:2},
-  {name:"Majority (B5-8/S4-10/R2)",    birth:[5,6,7,8],       survival:[4,5,6,7,8,9,10], radius:2},
+  {name:"⭐ B0146/S012",    birth:[0,1,4,6],       survival:[0,1,2],          radius:1},
+  {name:"⭐ B013456/S234",   birth:[0,1,3,4,5,6],  survival:[2,3,4],          radius:1},
 ];
 
 // ── Pattern Definitions ───────────────────────────────────────────
@@ -124,7 +123,7 @@ let playing    = true;
 let stepsPerSec= 15;
 let generation = 0;
 let population = 0;
-let curRule    = RULES[2]; // Default to Conway
+let curRule    = RULES[0]; // Default to first favorite
 let camera     = {x:0, y:0, zoom:1};
 
 // ── WebGL2 Setup ──────────────────────────────────────────────────
@@ -483,7 +482,60 @@ RULES.forEach((r,i) => {
   opt.textContent = r.name;
   ruleSelect.appendChild(opt);
 });
-ruleSelect.value = 2; // Default to Conway
+ruleSelect.value = 0; // Default to first favorite
+
+// ── Custom Rule Parser ────────────────────────────────────────────
+function parseRuleString(str){
+  str = str.trim().toUpperCase();
+  const m = str.match(/^B([\d,-]*)\s*\/\s*S([\d,-]*)(?:\s*\/\s*R(\d+))?$/);
+  if(!m) return null;
+  function parseNums(s){
+    if(!s) return [];
+    const nums = [];
+    for(const part of s.split(',')){
+      const range = part.match(/^(\d+)-(\d+)$/);
+      if(range){
+        const lo = parseInt(range[1]), hi = parseInt(range[2]);
+        for(let i = lo; i <= hi; i++) nums.push(i);
+      } else if(/^\d+$/.test(part)){
+        nums.push(parseInt(part));
+      } else { return null; }
+    }
+    return [...new Set(nums)].sort((a,b)=>a-b);
+  }
+  const birth = parseNums(m[1]);
+  const survival = parseNums(m[2]);
+  if(!birth || !survival) return null;
+  const radius = m[3] ? parseInt(m[3]) : 1;
+  if(radius < 1 || radius > 2) return null;
+  const maxN = radius === 2 ? 24 : 8;
+  if(birth.some(n => n < 0 || n > maxN) || survival.some(n => n < 0 || n > maxN)) return null;
+  const b = birth.join('');
+  const s = survival.join('');
+  const r = radius > 1 ? `/R${radius}` : '';
+  return {name:`B${b}/S${s}${r}`, birth, survival, radius};
+}
+
+const customInput = document.getElementById('custom-rule');
+const btnApply    = document.getElementById('btn-apply');
+
+function applyCustomRule(){
+  const rule = parseRuleString(customInput.value);
+  if(rule){
+    customInput.classList.remove('invalid');
+    curRule = rule;
+    ruleSelect.value = ''; // Deselect favorites
+    resetSim(false);
+  } else {
+    customInput.classList.add('invalid');
+  }
+}
+
+btnApply.addEventListener('click', applyCustomRule);
+customInput.addEventListener('keydown', (e) => {
+  if(e.key === 'Enter'){ e.preventDefault(); applyCustomRule(); }
+});
+customInput.addEventListener('input', () => customInput.classList.remove('invalid'));
 
 function updateRuleDisplay(){
   const b = curRule.birth.join('');
@@ -503,8 +555,13 @@ function resetSim(keepState){
 }
 
 ruleSelect.addEventListener('change', () => {
-  curRule = RULES[parseInt(ruleSelect.value)];
-  resetSim(false);
+  const idx = parseInt(ruleSelect.value);
+  if(!isNaN(idx) && RULES[idx]){
+    curRule = RULES[idx];
+    customInput.value = '';
+    customInput.classList.remove('invalid');
+    resetSim(false);
+  }
 });
 
 gridSizeSelect.addEventListener('change', () => {
@@ -611,12 +668,6 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'KeyR':
       document.getElementById('btn-random').click();
-      break;
-    case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
-    case 'Digit5': case 'Digit6': case 'Digit7': case 'Digit8':
-    case 'Digit9': case 'Digit0':
-      const idx = e.code === 'Digit0' ? 9 : parseInt(e.code.slice(5)) - 1;
-      if(idx < RULES.length){ ruleSelect.value = idx; ruleSelect.dispatchEvent(new Event('change')); }
       break;
     case 'Equal': case 'NumpadAdd':
       camera.zoom = Math.min(camera.zoom * 1.2, 50);
