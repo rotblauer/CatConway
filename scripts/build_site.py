@@ -13,18 +13,26 @@ OUTPUT_PATH = os.path.join(REPO_ROOT, "docs", "index.html")
 
 
 def parse_neighbor_part(s):
-    """Parse a birth/survival string like '0357' or '3,5,7' into a sorted list of ints."""
+    """Parse a birth/survival string like '0357', '3,5,7', or '3-5,7' into a sorted list of ints."""
     if not s:
         return []
-    if "," in s:
-        return sorted(int(x) for x in s.split(","))
+    if "," in s or "-" in s:
+        nums = []
+        for part in s.split(","):
+            m = re.match(r"^(\d+)-(\d+)$", part)
+            if m:
+                lo, hi = int(m.group(1)), int(m.group(2))
+                nums.extend(range(lo, hi + 1))
+            else:
+                nums.append(int(part))
+        return sorted(set(nums))
     return sorted(int(ch) for ch in s)
 
 
 def parse_rule(line):
-    """Parse 'B0357/S05678' or 'B3,5/S4,8/R2' into a dict, or None on failure."""
+    """Parse 'B0357/S05678' or 'B3-5/S4,8/R2' into a dict, or None on failure."""
     line = line.strip().upper()
-    m = re.match(r"^B([\d,]*)/S([\d,]*)(?:/R(\d+))?$", line)
+    m = re.match(r"^B([\d,\-]*)/S([\d,\-]*)(?:/R(\d+))?$", line)
     if not m:
         return None
     birth = parse_neighbor_part(m.group(1))
@@ -136,7 +144,7 @@ canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
   </div>
   <div class="controls">
     <label>Custom:</label>
-    <input type="text" id="custom-rule" placeholder="B3/S23 or B3,5/S4,8/R2" spellcheck="false" aria-label="Custom rule entry">
+    <input type="text" id="custom-rule" placeholder="B3/S23 or B3-5/S4,8/R2" spellcheck="false" aria-label="Custom rule entry">
     <button id="btn-apply" class="tooltip" data-tip="Enter" aria-label="Apply custom rule">Apply</button>
   </div>
   <div class="sep"></div>
