@@ -321,6 +321,7 @@ impl App {
                     classified_count: progress.classified_count,
                     class_counts: progress.class_counts,
                     results,
+                    cluster_summaries: progress.cluster_summaries,
                 }
             } else {
                 ClassifyInfo {
@@ -331,6 +332,7 @@ impl App {
                     classified_count: 0,
                     class_counts: std::collections::HashMap::new(),
                     results: Vec::new(),
+                    cluster_summaries: Vec::new(),
                 }
             };
 
