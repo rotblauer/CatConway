@@ -637,7 +637,11 @@ impl App {
                 "5" => self.load_pattern("LWSS", &pattern_lwss()),
                 "n" => {
                     let rules = rule_sets();
-                    self.current_rule_idx = (self.current_rule_idx + 1) % rules.len();
+                    self.current_rule_idx = if self.current_rule_idx < rules.len() {
+                        (self.current_rule_idx + 1) % rules.len()
+                    } else {
+                        0
+                    };
                     self.grid.rules = rules[self.current_rule_idx].1;
                     if let Some(ref gpu) = self.gpu {
                         gpu.simulation
