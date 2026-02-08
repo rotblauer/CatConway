@@ -382,8 +382,9 @@ fn population_entropy(data: &[f64]) -> f64 {
 
     let num_bins = 50usize;
     let mut bins = vec![0u64; num_bins];
+    let bin_max_idx = (num_bins - 1) as f64;
     for &v in data {
-        let idx = ((v - min_v) / range * (num_bins - 1) as f64).round() as usize;
+        let idx = ((v - min_v) / range * bin_max_idx).round() as usize;
         bins[idx.min(num_bins - 1)] += 1;
     }
 
@@ -397,6 +398,9 @@ fn population_entropy(data: &[f64]) -> f64 {
     }
     entropy
 }
+
+/// Minimum autocorrelation value required to consider a lag as a true period.
+const MIN_PERIOD_ACF_THRESHOLD: f64 = 0.7;
 
 /// Detect the dominant period in a time series using autocorrelation peaks.
 /// Returns 0 if no clear period is found.
@@ -414,7 +418,7 @@ fn detect_dominant_period(data: &[f64], max_period: usize) -> usize {
 
     let limit = max_period.min(n / 2);
     let mut best_period = 0;
-    let mut best_acf = 0.7; // Threshold: only report if autocorrelation > 0.7
+    let mut best_acf = MIN_PERIOD_ACF_THRESHOLD;
 
     for lag in 1..=limit {
         let acf: f64 = data
@@ -587,7 +591,7 @@ fn normalize_features(features: &[[f64; 10]]) -> (Vec<[f64; 10]>, [f64; 10], [f6
     for s in &mut stddevs {
         *s = (*s / n).sqrt();
         if *s < 1e-12 {
-            *s = 1.0; // Avoid division by zero.
+            *s = 1.0; // Constant feature: use unit stddev to avoid near-zero division.
         }
     }
 
@@ -888,6 +892,9 @@ fn run_classify(
     let max_n = max_neighbors(config.radius);
     let mask_count = 1u32 << (max_n + 1);
 
+    /// Number of newly classified rules between re-clustering passes.
+    const RECLUSTER_BATCH_SIZE: u32 = 100;
+
     let mut batch_count = 0u32;
 
     // birth=0 means no cells can ever be born → skip entirely.
@@ -944,7 +951,7 @@ fn run_classify(
             batch_count += 1;
 
             // Re-cluster every 100 new rules to keep clusters up-to-date.
-            if batch_count % 100 == 0 {
+            if batch_count % RECLUSTER_BATCH_SIZE == 0 {
                 let s = state.lock().unwrap();
                 if s.results.len() >= 8 {
                     let features: Vec<[f64; 10]> =
