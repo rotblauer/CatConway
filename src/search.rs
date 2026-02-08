@@ -440,12 +440,23 @@ pub fn load_results(path: &Path) -> Vec<(String, Rules)> {
 /// Returns a handle that can be used to query progress and stop the search.
 pub fn spawn_search(config: SearchConfig) -> SearchHandle {
     let examined = load_examined(&config.examined_path);
+    let prior_results = load_results(&config.results_path);
+    let prior_interesting: Vec<SearchResult> = prior_results
+        .into_iter()
+        .map(|(label, rules)| SearchResult {
+            rules,
+            label,
+            variation: 0.0,
+            final_density: 0.0,
+        })
+        .collect();
+    let prior_count = prior_interesting.len();
 
     let state = Arc::new(Mutex::new(SearchState {
         total_examined: examined.len(),
-        total_interesting: 0,
+        total_interesting: prior_count,
         examined,
-        results: Vec::new(),
+        results: prior_interesting,
         running: true,
     }));
 
@@ -813,6 +824,51 @@ mod tests {
         handle.stop();
         thread::sleep(Duration::from_millis(300));
         assert!(!handle.progress().running);
+
+        let _ = fs::remove_file(&results_path);
+        let _ = fs::remove_file(&examined_path);
+    }
+
+    #[test]
+    fn spawn_search_loads_prior_results() {
+        let results_path = std::env::temp_dir().join("catconway_test_spawn_prior_results.txt");
+        let examined_path = std::env::temp_dir().join("catconway_test_spawn_prior_examined.txt");
+        let _ = fs::remove_file(&results_path);
+        let _ = fs::remove_file(&examined_path);
+
+        // Write a prior result to disk.
+        ensure_results_header(&results_path);
+        append_result(
+            &results_path,
+            &SearchResult {
+                rules: Rules::conway(),
+                label: "B3/S23".into(),
+                variation: 0.12,
+                final_density: 0.03,
+            },
+        );
+
+        // Spawn a search with those files — it should load the prior result.
+        let config = SearchConfig {
+            grid_size: 8,
+            generations: 10,
+            results_path: results_path.clone(),
+            examined_path: examined_path.clone(),
+            ..SearchConfig::default()
+        };
+
+        let handle = spawn_search(config);
+
+        // Prior results should be visible immediately.
+        let results = handle.results();
+        assert_eq!(results.len(), 1, "expected 1 prior result loaded");
+        assert_eq!(results[0].label, "B3/S23");
+
+        let progress = handle.progress();
+        assert_eq!(progress.total_interesting, 1);
+
+        handle.stop();
+        thread::sleep(Duration::from_millis(300));
 
         let _ = fs::remove_file(&results_path);
         let _ = fs::remove_file(&examined_path);

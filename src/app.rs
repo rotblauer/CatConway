@@ -566,10 +566,9 @@ impl App {
                 if let Some(result) = results.get(idx) {
                     self.grid.rules = result.rules;
                     self.current_rule_idx = usize::MAX;
-                    if let Some(ref gpu) = self.gpu {
-                        gpu.simulation
-                            .update_rules(&gpu.queue, self.grid.sim_params());
-                    }
+                    self.grid.randomize(INITIAL_DENSITY);
+                    self.upload_grid();
+                    self.stats.clear();
                     log::info!("Applied search result: {}", result.label);
                 }
             }
@@ -608,10 +607,9 @@ impl App {
                 if let Some(result) = results.get(idx) {
                     self.grid.rules = result.rules;
                     self.current_rule_idx = usize::MAX;
-                    if let Some(ref gpu) = self.gpu {
-                        gpu.simulation
-                            .update_rules(&gpu.queue, self.grid.sim_params());
-                    }
+                    self.grid.randomize(INITIAL_DENSITY);
+                    self.upload_grid();
+                    self.stats.clear();
                     log::info!(
                         "Applied classified rule: {} [{}]",
                         result.label,
