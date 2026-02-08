@@ -1,4 +1,97 @@
-<!DOCTYPE html>
+#!/usr/bin/env python3
+"""Read favorites.txt and generate docs/index.html with the rules embedded."""
+
+import os
+import re
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FAVORITES_PATH = os.path.join(REPO_ROOT, "favorites.txt")
+OUTPUT_PATH = os.path.join(REPO_ROOT, "docs", "index.html")
+
+# ── Rule parser ────────────────────────────────────────────────────────────
+
+
+def parse_neighbor_part(s):
+    """Parse a birth/survival string like '0357' or '3,5,7' into a sorted list of ints."""
+    if not s:
+        return []
+    if "," in s:
+        return sorted(int(x) for x in s.split(","))
+    return sorted(int(ch) for ch in s)
+
+
+def parse_rule(line):
+    """Parse 'B0357/S05678' or 'B3,5/S4,8/R2' into a dict, or None on failure."""
+    line = line.strip().upper()
+    m = re.match(r"^B([\d,]*)/S([\d,]*)(?:/R(\d+))?$", line)
+    if not m:
+        return None
+    birth = parse_neighbor_part(m.group(1))
+    survival = parse_neighbor_part(m.group(2))
+    radius = int(m.group(3)) if m.group(3) else 1
+    b_str = "".join(str(d) for d in birth)
+    s_str = "".join(str(d) for d in survival)
+    r_str = f"/R{radius}" if radius > 1 else ""
+    name = f"B{b_str}/S{s_str}{r_str}"
+    return {"name": name, "birth": birth, "survival": survival, "radius": radius}
+
+
+def load_favorites(path):
+    """Load rules from favorites.txt, skipping comments and blank lines."""
+    rules = []
+    if not os.path.exists(path):
+        return rules
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            token = line.split()[0]
+            rule = parse_rule(token)
+            if rule:
+                rules.append(rule)
+    return rules
+
+
+# ── Built-in classic rules ─────────────────────────────────────────────────
+
+BUILTIN_RULES = [
+    {"name": "B3/S23", "birth": [3], "survival": [2, 3], "radius": 1},
+    {"name": "B36/S23", "birth": [3, 6], "survival": [2, 3], "radius": 1},
+    {"name": "B3678/S34678", "birth": [3, 6, 7, 8], "survival": [3, 4, 6, 7, 8], "radius": 1},
+    {"name": "B2/S", "birth": [2], "survival": [], "radius": 1},
+    {"name": "B3/S012345678", "birth": [3], "survival": [0, 1, 2, 3, 4, 5, 6, 7, 8], "radius": 1},
+]
+
+
+def rule_to_js(rule, is_favorite=False):
+    """Convert a rule dict into a JS object literal string."""
+    prefix = "\u2b50 " if is_favorite else ""
+    name = prefix + rule["name"]
+    birth = repr(rule["birth"])
+    survival = repr(rule["survival"])
+    radius = rule["radius"]
+    return f'  {{name:"{name}", birth:{birth}, survival:{survival}, radius:{radius}}}'
+
+
+def build_rules_array(favorites, builtins):
+    """Build the complete JS RULES array source."""
+    lines = ["const RULES = ["]
+    if favorites:
+        lines.append("  // Favorites from favorites.txt")
+        for r in favorites:
+            lines.append(rule_to_js(r, is_favorite=True) + ",")
+    lines.append("  // Classic rules")
+    for r in builtins:
+        lines.append(rule_to_js(r) + ",")
+    lines.append("];")
+    return "\n".join(lines)
+
+
+# ── HTML template ──────────────────────────────────────────────────────────
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -97,16 +190,7 @@ canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
 "use strict";
 
 // ── Rule Definitions (auto-generated from favorites.txt) ─────────
-const RULES = [
-  // Favorites from favorites.txt
-  {name:"⭐ B0357/S05678", birth:[0, 3, 5, 7], survival:[0, 5, 6, 7, 8], radius:1},
-  // Classic rules
-  {name:"B3/S23", birth:[3], survival:[2, 3], radius:1},
-  {name:"B36/S23", birth:[3, 6], survival:[2, 3], radius:1},
-  {name:"B3678/S34678", birth:[3, 6, 7, 8], survival:[3, 4, 6, 7, 8], radius:1},
-  {name:"B2/S", birth:[2], survival:[], radius:1},
-  {name:"B3/S012345678", birth:[3], survival:[0, 1, 2, 3, 4, 5, 6, 7, 8], radius:1},
-];
+%%RULES%%
 
 // ── Pattern Definitions ───────────────────────────────────────────
 const PATTERNS = {
@@ -720,4 +804,26 @@ updateRuleDisplay();
 requestAnimationFrame(mainLoop);
 </script>
 </body>
-</html>
+</html>"""
+
+
+# ── Main ───────────────────────────────────────────────────────────────────
+
+
+def main():
+    favorites = load_favorites(FAVORITES_PATH)
+    print(f"Loaded {len(favorites)} favorite(s) from {FAVORITES_PATH}")
+    for r in favorites:
+        print(f"  {r['name']}")
+
+    rules_js = build_rules_array(favorites, BUILTIN_RULES)
+    html = HTML_TEMPLATE.replace("%%RULES%%", rules_js)
+
+    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+    with open(OUTPUT_PATH, "w") as f:
+        f.write(html)
+    print(f"Generated {OUTPUT_PATH}")
+
+
+if __name__ == "__main__":
+    main()
