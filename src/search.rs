@@ -432,6 +432,43 @@ pub fn load_results(path: &Path) -> Vec<(String, Rules)> {
     out
 }
 
+/// Load full search results (including metrics) from a results file.
+fn load_search_results(path: &Path) -> Vec<SearchResult> {
+    let mut out = Vec::new();
+    let Ok(file) = fs::File::open(path) else {
+        return out;
+    };
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let line = line.trim().to_string();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let label = parts.first().copied().unwrap_or("");
+        let Some(rules) = parse_rule_label(label) else {
+            continue;
+        };
+        let mut variation = 0.0;
+        let mut final_density = 0.0;
+        for part in &parts[1..] {
+            if let Some((key, val)) = part.split_once('=') {
+                match key {
+                    "variation" => variation = val.parse().unwrap_or(0.0),
+                    "final_density" => final_density = val.parse().unwrap_or(0.0),
+                    _ => {}
+                }
+            }
+        }
+        out.push(SearchResult {
+            rules,
+            label: label.to_string(),
+            variation,
+            final_density,
+        });
+    }
+    out
+}
+
 // ── Background search thread ────────────────────────────────────────────────
 
 /// Spawn a background thread that iterates over rule sets for the configured
@@ -440,23 +477,14 @@ pub fn load_results(path: &Path) -> Vec<(String, Rules)> {
 /// Returns a handle that can be used to query progress and stop the search.
 pub fn spawn_search(config: SearchConfig) -> SearchHandle {
     let examined = load_examined(&config.examined_path);
-    let prior_results = load_results(&config.results_path);
-    let prior_interesting: Vec<SearchResult> = prior_results
-        .into_iter()
-        .map(|(label, rules)| SearchResult {
-            rules,
-            label,
-            variation: 0.0,
-            final_density: 0.0,
-        })
-        .collect();
-    let prior_count = prior_interesting.len();
+    let prior_results = load_search_results(&config.results_path);
+    let prior_count = prior_results.len();
 
     let state = Arc::new(Mutex::new(SearchState {
         total_examined: examined.len(),
         total_interesting: prior_count,
         examined,
-        results: prior_interesting,
+        results: prior_results,
         running: true,
     }));
 

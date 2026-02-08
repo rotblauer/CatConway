@@ -567,7 +567,7 @@ impl App {
                     self.grid.rules = result.rules;
                     self.current_rule_idx = usize::MAX;
                     self.grid.randomize(INITIAL_DENSITY);
-                    self.upload_grid();
+                    self.upload_grid(); // resets generation to 0
                     self.stats.clear();
                     log::info!("Applied search result: {}", result.label);
                 }
@@ -608,7 +608,7 @@ impl App {
                     self.grid.rules = result.rules;
                     self.current_rule_idx = usize::MAX;
                     self.grid.randomize(INITIAL_DENSITY);
-                    self.upload_grid();
+                    self.upload_grid(); // resets generation to 0
                     self.stats.clear();
                     log::info!(
                         "Applied classified rule: {} [{}]",
