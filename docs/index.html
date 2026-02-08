@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CatConway — Cellular Automata Explorer</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#111;--panel:#1a1a2e;--accent:#0f3460;--highlight:#e94560;--text:#eee;--muted:#888;--border:#333}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden;height:100vh;display:flex;flex-direction:column}
+header{background:var(--panel);padding:8px 16px;display:flex;align-items:center;gap:16px;border-bottom:1px solid var(--border);flex-wrap:wrap;z-index:10}
+header h1{font-size:1.1rem;font-weight:700;white-space:nowrap}
+header h1 span{color:var(--highlight)}
+.controls{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.controls label{font-size:.75rem;color:var(--muted)}
+select,button,input[type=range]{font-size:.8rem;background:var(--accent);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;cursor:pointer;outline:none}
+select{max-width:220px}
+button:hover{background:var(--highlight)}
+button.active{background:var(--highlight)}
+input[type=range]{width:80px;padding:0;vertical-align:middle}
+.sep{width:1px;height:20px;background:var(--border);margin:0 4px}
+#canvas-wrap{flex:1;position:relative;overflow:hidden}
+canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
+#info{position:absolute;bottom:8px;left:8px;font-size:.7rem;color:var(--muted);pointer-events:none;background:rgba(0,0,0,.6);padding:4px 8px;border-radius:4px}
+#rule-display{position:absolute;top:8px;right:8px;font-size:.85rem;color:var(--highlight);background:rgba(0,0,0,.7);padding:6px 12px;border-radius:4px;font-family:monospace;pointer-events:none}
+.tooltip{position:relative}
+.tooltip::after{content:attr(data-tip);position:absolute;bottom:110%;left:50%;transform:translateX(-50%);background:#222;color:#ccc;font-size:.65rem;padding:3px 7px;border-radius:3px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s}
+.tooltip:hover::after{opacity:1}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🐱 <span>Cat</span>Conway</h1>
+  <div class="sep"></div>
+
+  <div class="controls">
+    <label>Rule:</label>
+    <select id="rule-select"></select>
+  </div>
+  <div class="sep"></div>
+
+  <div class="controls">
+    <button id="btn-play" class="tooltip active" data-tip="Space">▶ Play</button>
+    <button id="btn-step" class="tooltip" data-tip="Right Arrow">⏭ Step</button>
+    <button id="btn-clear" class="tooltip" data-tip="C">⌫ Clear</button>
+    <button id="btn-random" class="tooltip" data-tip="R">🎲 Random</button>
+  </div>
+  <div class="sep"></div>
+
+  <div class="controls">
+    <label>Speed:</label>
+    <input type="range" id="speed" min="1" max="60" value="15">
+    <span id="speed-val" style="font-size:.75rem;min-width:28px">15</span>
+  </div>
+  <div class="sep"></div>
+
+  <div class="controls">
+    <label>Pattern:</label>
+    <select id="pattern-select">
+      <option value="draw">✏️ Draw</option>
+      <option value="glider">Glider</option>
+      <option value="rpentomino">R-pentomino</option>
+      <option value="acorn">Acorn</option>
+      <option value="lwss">LWSS</option>
+      <option value="gospergun">Gosper Gun</option>
+    </select>
+  </div>
+  <div class="sep"></div>
+
+  <div class="controls">
+    <label>Grid:</label>
+    <select id="grid-size">
+      <option value="256">256×256</option>
+      <option value="512" selected>512×512</option>
+      <option value="1024">1024×1024</option>
+      <option value="2048">2048×2048</option>
+    </select>
+  </div>
+</header>
+
+<div id="canvas-wrap">
+  <canvas id="c"></canvas>
+  <div id="rule-display"></div>
+  <div id="info"></div>
+</div>
+
+<script>
+"use strict";
+
+// ── Rule Definitions ──────────────────────────────────────────────
+const RULES = [
+  // Favorites from favorites.txt
+  {name:"⭐ B0146/S012 (Favorite)",    birth:[0,1,4,6],       survival:[0,1,2],          radius:1},
+  {name:"⭐ B013456/S234 (Favorite)",   birth:[0,1,3,4,5,6],  survival:[2,3,4],          radius:1},
+  // Built-in rules
+  {name:"Conway (B3/S23)",              birth:[3],             survival:[2,3],            radius:1},
+  {name:"HighLife (B36/S23)",           birth:[3,6],           survival:[2,3],            radius:1},
+  {name:"Day & Night (B3678/S34678)",   birth:[3,6,7,8],      survival:[3,4,6,7,8],      radius:1},
+  {name:"Seeds (B2/S)",                 birth:[2],             survival:[],               radius:1},
+  {name:"Life w/o Death (B3/S012345678)",birth:[3],            survival:[0,1,2,3,4,5,6,7,8],radius:1},
+  {name:"Bugs (B3-5/S4-8/R2)",         birth:[3,4,5],         survival:[4,5,6,7,8],      radius:2},
+  {name:"Globe (B7-11/S7-11/R2)",      birth:[7,8,9,10,11],   survival:[7,8,9,10,11],    radius:2},
+  {name:"Majority (B5-8/S4-10/R2)",    birth:[5,6,7,8],       survival:[4,5,6,7,8,9,10], radius:2},
+];
+
+// ── Pattern Definitions ───────────────────────────────────────────
+const PATTERNS = {
+  glider:    {w:3,h:3,cells:[[1,0],[2,1],[0,2],[1,2],[2,2]]},
+  rpentomino:{w:3,h:3,cells:[[1,0],[2,0],[0,1],[1,1],[1,2]]},
+  acorn:     {w:7,h:3,cells:[[1,0],[3,1],[0,2],[1,2],[4,2],[5,2],[6,2]]},
+  lwss:      {w:5,h:4,cells:[[1,0],[4,0],[0,1],[0,2],[4,2],[0,3],[1,3],[2,3],[3,3]]},
+  gospergun: {w:36,h:9,cells:[
+    [24,0],[22,1],[24,1],[12,2],[13,2],[20,2],[21,2],[34,2],[35,2],
+    [11,3],[15,3],[20,3],[21,3],[34,3],[35,3],[0,4],[1,4],[10,4],
+    [16,4],[20,4],[21,4],[0,5],[1,5],[10,5],[14,5],[16,5],[17,5],
+    [22,5],[24,5],[10,6],[16,6],[24,6],[11,7],[15,7],[12,8],[13,8]
+  ]},
+};
+
+// ── State ─────────────────────────────────────────────────────────
+let gridSize   = 512;
+let playing    = true;
+let stepsPerSec= 15;
+let generation = 0;
+let population = 0;
+let curRule    = RULES[2]; // Default to Conway
+let camera     = {x:0, y:0, zoom:1};
+
+// ── WebGL2 Setup ──────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', {antialias:false, preserveDrawingBuffer:false});
+if(!gl){document.body.innerHTML='<h2 style="color:red;padding:2rem">WebGL2 required but not available.</h2>';throw new Error('No WebGL2');}
+
+// Extensions
+gl.getExtension('EXT_color_buffer_float');
+
+// Full-screen quad
+const quadVerts = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+const quadBuf   = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+// ── Shader Sources ────────────────────────────────────────────────
+const VS = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main(){
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+// Simulation fragment shader — counts neighbors, applies B/S rule
+const SIM_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+
+uniform sampler2D u_state;
+uniform vec2 u_size;
+uniform int u_birth[26];    // birth counts (1=active), indexed by neighbor count
+uniform int u_survival[26]; // survival counts
+uniform int u_radius;       // neighborhood radius (1 or 2)
+
+void main(){
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  int sz = int(u_size.x);
+  float me = texelFetch(u_state, coord, 0).r;
+  int neighbors = 0;
+  for(int dy = -u_radius; dy <= u_radius; dy++){
+    for(int dx = -u_radius; dx <= u_radius; dx++){
+      if(dx == 0 && dy == 0) continue;
+      ivec2 nc = (coord + ivec2(dx, dy) + ivec2(sz)) % ivec2(sz);
+      neighbors += int(texelFetch(u_state, nc, 0).r > 0.5);
+    }
+  }
+  float alive;
+  if(me > 0.5){
+    alive = float(u_survival[neighbors]);
+  } else {
+    alive = float(u_birth[neighbors]);
+  }
+  fragColor = vec4(alive, alive, alive, 1.0);
+}`;
+
+// Render fragment shader — displays state with camera transform and coloring
+const RENDER_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+
+uniform sampler2D u_state;
+uniform vec2 u_resolution;
+uniform vec2 u_gridSize;
+uniform vec2 u_camera;   // pan offset in grid coords
+uniform float u_zoom;
+
+void main(){
+  // Map screen UV to grid coordinates with camera
+  vec2 aspect = u_resolution / min(u_resolution.x, u_resolution.y);
+  vec2 gridUV = (v_uv - 0.5) * aspect / u_zoom + 0.5 + u_camera / u_gridSize;
+  // Wrap
+  gridUV = fract(gridUV);
+  float cell = texture(u_state, gridUV).r;
+
+  // Color: alive = bright green-white, dead = dark
+  vec3 alive_color = vec3(0.35, 0.95, 0.55);
+  vec3 dead_color  = vec3(0.06, 0.06, 0.1);
+  vec3 col = mix(dead_color, alive_color, cell);
+
+  // Grid lines when zoomed in
+  vec2 gridCoord = gridUV * u_gridSize;
+  vec2 gridFrac = fract(gridCoord);
+  float lineWidth = 0.03 * u_zoom;
+  if(u_zoom > 3.0){
+    float grid_line = step(gridFrac.x, lineWidth) + step(gridFrac.y, lineWidth);
+    col = mix(col, vec3(0.15, 0.15, 0.2), min(grid_line, 1.0) * 0.5);
+  }
+
+  fragColor = vec4(col, 1.0);
+}`;
+
+// ── Shader Compilation ────────────────────────────────────────────
+function createShader(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(s));
+    gl.deleteShader(s);
+    return null;
+  }
+  return s;
+}
+
+function createProgram(vsSrc, fsSrc){
+  const vs = createShader(gl.VERTEX_SHADER, vsSrc);
+  const fs = createShader(gl.FRAGMENT_SHADER, fsSrc);
+  const p  = gl.createProgram();
+  gl.attachShader(p, vs);
+  gl.attachShader(p, fs);
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p, gl.LINK_STATUS)){
+    console.error(gl.getProgramInfoLog(p));
+    return null;
+  }
+  return p;
+}
+
+const simProg    = createProgram(VS, SIM_FS);
+const renderProg = createProgram(VS, RENDER_FS);
+
+// Uniform locations
+const simUni = {
+  state:    gl.getUniformLocation(simProg, 'u_state'),
+  size:     gl.getUniformLocation(simProg, 'u_size'),
+  birth:    [],
+  survival: [],
+  radius:   gl.getUniformLocation(simProg, 'u_radius'),
+};
+for(let i=0;i<26;i++){
+  simUni.birth.push(gl.getUniformLocation(simProg, `u_birth[${i}]`));
+  simUni.survival.push(gl.getUniformLocation(simProg, `u_survival[${i}]`));
+}
+
+const renUni = {
+  state:      gl.getUniformLocation(renderProg, 'u_state'),
+  resolution: gl.getUniformLocation(renderProg, 'u_resolution'),
+  gridSize:   gl.getUniformLocation(renderProg, 'u_gridSize'),
+  camera:     gl.getUniformLocation(renderProg, 'u_camera'),
+  zoom:       gl.getUniformLocation(renderProg, 'u_zoom'),
+};
+
+// ── Framebuffers (ping-pong) ──────────────────────────────────────
+let texA, texB, fboA, fboB;
+
+function createStateTexture(size, data){
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, size, size, 0, gl.RED, gl.FLOAT, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  return tex;
+}
+
+function createFBO(tex){
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  return fbo;
+}
+
+function initBuffers(size, data){
+  if(texA) gl.deleteTexture(texA);
+  if(texB) gl.deleteTexture(texB);
+  if(fboA) gl.deleteFramebuffer(fboA);
+  if(fboB) gl.deleteFramebuffer(fboB);
+  texA = createStateTexture(size, data || null);
+  texB = createStateTexture(size, null);
+  fboA = createFBO(texA);
+  fboB = createFBO(texB);
+}
+
+// ── Grid State Helpers ────────────────────────────────────────────
+function randomGrid(){
+  const data = new Float32Array(gridSize * gridSize);
+  const density = curRule.radius === 2 ? 0.4 : 0.3;
+  for(let i = 0; i < data.length; i++) data[i] = Math.random() < density ? 1.0 : 0.0;
+  return data;
+}
+
+function clearGrid(){
+  return new Float32Array(gridSize * gridSize);
+}
+
+function stampPattern(data, pattern, cx, cy){
+  const p = PATTERNS[pattern];
+  if(!p) return;
+  const ox = cx - Math.floor(p.w/2);
+  const oy = cy - Math.floor(p.h/2);
+  for(const [px,py] of p.cells){
+    const x = ((ox + px) % gridSize + gridSize) % gridSize;
+    const y = ((oy + py) % gridSize + gridSize) % gridSize;
+    data[y * gridSize + x] = 1.0;
+  }
+}
+
+function uploadState(data){
+  gl.bindTexture(gl.TEXTURE_2D, texA);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gridSize, gridSize, gl.RED, gl.FLOAT, data);
+}
+
+function readState(){
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fboA);
+  const data = new Float32Array(gridSize * gridSize * 4);
+  gl.readPixels(0, 0, gridSize, gridSize, gl.RGBA, gl.FLOAT, data);
+  const state = new Float32Array(gridSize * gridSize);
+  for(let i = 0; i < state.length; i++) state[i] = data[i*4];
+  return state;
+}
+
+// ── Simulation Step ───────────────────────────────────────────────
+function setupQuad(prog){
+  const loc = gl.getAttribLocation(prog, 'a_pos');
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+}
+
+function simStep(){
+  gl.viewport(0, 0, gridSize, gridSize);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fboB);
+  gl.useProgram(simProg);
+  setupQuad(simProg);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texA);
+  gl.uniform1i(simUni.state, 0);
+  gl.uniform2f(simUni.size, gridSize, gridSize);
+  gl.uniform1i(simUni.radius, curRule.radius);
+
+  // Set birth/survival arrays
+  const maxN = curRule.radius === 2 ? 24 : 8;
+  for(let i = 0; i < 26; i++){
+    gl.uniform1i(simUni.birth[i], curRule.birth.includes(i) && i <= maxN ? 1 : 0);
+    gl.uniform1i(simUni.survival[i], curRule.survival.includes(i) && i <= maxN ? 1 : 0);
+  }
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // Swap
+  [texA, texB] = [texB, texA];
+  [fboA, fboB] = [fboB, fboA];
+  generation++;
+}
+
+// ── Render ────────────────────────────────────────────────────────
+function render(){
+  const w = canvas.width;
+  const h = canvas.height;
+  gl.viewport(0, 0, w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.useProgram(renderProg);
+  setupQuad(renderProg);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texA);
+  gl.uniform1i(renUni.state, 0);
+  gl.uniform2f(renUni.resolution, w, h);
+  gl.uniform2f(renUni.gridSize, gridSize, gridSize);
+  gl.uniform2f(renUni.camera, camera.x, camera.y);
+  gl.uniform1f(renUni.zoom, camera.zoom);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ── Population Count ──────────────────────────────────────────────
+let popCountInterval;
+function countPopulation(){
+  // Read a small sample for performance
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fboA);
+  const sampleSize = Math.min(gridSize, 256);
+  const data = new Float32Array(sampleSize * sampleSize * 4);
+  gl.readPixels(0, 0, sampleSize, sampleSize, gl.RGBA, gl.FLOAT, data);
+  let count = 0;
+  for(let i = 0; i < sampleSize * sampleSize; i++){
+    if(data[i*4] > 0.5) count++;
+  }
+  // Scale up if sampling
+  population = Math.round(count * (gridSize * gridSize) / (sampleSize * sampleSize));
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+// ── Main Loop ─────────────────────────────────────────────────────
+let lastStep = 0;
+function mainLoop(now){
+  requestAnimationFrame(mainLoop);
+
+  // Resize canvas if needed
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr  = window.devicePixelRatio || 1;
+  const cw   = Math.round(rect.width * dpr);
+  const ch   = Math.round(rect.height * dpr);
+  if(canvas.width !== cw || canvas.height !== ch){
+    canvas.width  = cw;
+    canvas.height = ch;
+  }
+
+  // Simulation steps
+  if(playing){
+    const interval = 1000 / stepsPerSec;
+    if(now - lastStep >= interval){
+      simStep();
+      lastStep = now;
+    }
+  }
+
+  render();
+
+  // Update info
+  if(generation % 10 === 0) countPopulation();
+  const info = document.getElementById('info');
+  info.textContent = `Gen: ${generation} | Pop: ~${population.toLocaleString()} | Grid: ${gridSize}×${gridSize} | Zoom: ${camera.zoom.toFixed(1)}x`;
+}
+
+// ── Screen → Grid Coordinate Mapping ─────────────────────────────
+function screenToGrid(sx, sy){
+  const rect = canvas.getBoundingClientRect();
+  const dpr  = window.devicePixelRatio || 1;
+  const w = rect.width * dpr;
+  const h = rect.height * dpr;
+  const px = (sx - rect.left) * dpr;
+  const py = (sy - rect.top) * dpr;
+
+  // Reverse the render shader's UV math
+  const uvx = px / w;
+  const uvy = 1.0 - py / h; // flip Y
+  const minDim = Math.min(w, h);
+  const ax = w / minDim;
+  const ay = h / minDim;
+  let gx = (uvx - 0.5) * ax / camera.zoom + 0.5 + camera.x / gridSize;
+  let gy = (uvy - 0.5) * ay / camera.zoom + 0.5 + camera.y / gridSize;
+  gx = ((gx % 1) + 1) % 1;
+  gy = ((gy % 1) + 1) % 1;
+  return [Math.floor(gx * gridSize), Math.floor(gy * gridSize)];
+}
+
+// ── UI Controls ───────────────────────────────────────────────────
+const ruleSelect    = document.getElementById('rule-select');
+const patternSelect = document.getElementById('pattern-select');
+const gridSizeSelect= document.getElementById('grid-size');
+const speedSlider   = document.getElementById('speed');
+const speedVal      = document.getElementById('speed-val');
+const ruleDisplay   = document.getElementById('rule-display');
+const btnPlay       = document.getElementById('btn-play');
+
+// Populate rule selector
+RULES.forEach((r,i) => {
+  const opt = document.createElement('option');
+  opt.value = i;
+  opt.textContent = r.name;
+  ruleSelect.appendChild(opt);
+});
+ruleSelect.value = 2; // Default to Conway
+
+function updateRuleDisplay(){
+  const b = curRule.birth.join('');
+  const s = curRule.survival.join('');
+  const r = curRule.radius > 1 ? `/R${curRule.radius}` : '';
+  ruleDisplay.textContent = `B${b}/S${s}${r}`;
+}
+
+function resetSim(keepState){
+  generation = 0;
+  population = 0;
+  if(!keepState){
+    const data = randomGrid();
+    initBuffers(gridSize, data);
+  }
+  updateRuleDisplay();
+}
+
+ruleSelect.addEventListener('change', () => {
+  curRule = RULES[parseInt(ruleSelect.value)];
+  resetSim(false);
+});
+
+gridSizeSelect.addEventListener('change', () => {
+  gridSize = parseInt(gridSizeSelect.value);
+  camera = {x:0, y:0, zoom:1};
+  resetSim(false);
+});
+
+speedSlider.addEventListener('input', () => {
+  stepsPerSec = parseInt(speedSlider.value);
+  speedVal.textContent = stepsPerSec;
+});
+
+btnPlay.addEventListener('click', () => {
+  playing = !playing;
+  btnPlay.textContent = playing ? '▶ Play' : '⏸ Pause';
+  btnPlay.classList.toggle('active', playing);
+});
+
+document.getElementById('btn-step').addEventListener('click', () => {
+  if(playing){ playing = false; btnPlay.textContent = '⏸ Pause'; btnPlay.classList.remove('active'); }
+  simStep();
+});
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  generation = 0;
+  population = 0;
+  initBuffers(gridSize, clearGrid());
+});
+
+document.getElementById('btn-random').addEventListener('click', () => {
+  resetSim(false);
+});
+
+// ── Mouse/Touch Interaction ───────────────────────────────────────
+let dragging = false;
+let drawing  = false;
+let lastMouse= {x:0,y:0};
+
+canvas.addEventListener('mousedown', (e) => {
+  if(e.button === 1 || e.button === 2 || e.shiftKey){
+    // Middle/right click or shift: pan
+    dragging = true;
+    lastMouse = {x:e.clientX, y:e.clientY};
+    e.preventDefault();
+  } else if(e.button === 0){
+    // Left click: draw or stamp
+    const [gx, gy] = screenToGrid(e.clientX, e.clientY);
+    const pat = patternSelect.value;
+    if(pat === 'draw'){
+      drawing = true;
+      const state = readState();
+      const idx = gy * gridSize + gx;
+      state[idx] = state[idx] > 0.5 ? 0.0 : 1.0;
+      uploadState(state);
+    } else {
+      const state = readState();
+      stampPattern(state, pat, gx, gy);
+      uploadState(state);
+    }
+  }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  if(dragging){
+    const dx = e.clientX - lastMouse.x;
+    const dy = e.clientY - lastMouse.y;
+    const dpr = window.devicePixelRatio || 1;
+    const minDim = Math.min(canvas.width, canvas.height);
+    camera.x -= dx * dpr * gridSize / (minDim * camera.zoom);
+    camera.y += dy * dpr * gridSize / (minDim * camera.zoom);
+    lastMouse = {x:e.clientX, y:e.clientY};
+  } else if(drawing){
+    const [gx, gy] = screenToGrid(e.clientX, e.clientY);
+    const state = readState();
+    state[gy * gridSize + gx] = 1.0;
+    uploadState(state);
+  }
+});
+
+canvas.addEventListener('mouseup', () => { dragging = false; drawing = false; });
+canvas.addEventListener('mouseleave', () => { dragging = false; drawing = false; });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.15 : 1/1.15;
+  camera.zoom = Math.max(0.25, Math.min(camera.zoom * factor, 50));
+}, {passive:false});
+
+// ── Keyboard Shortcuts ────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if(e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  switch(e.code){
+    case 'Space':
+      e.preventDefault();
+      btnPlay.click();
+      break;
+    case 'ArrowRight':
+      document.getElementById('btn-step').click();
+      break;
+    case 'KeyC':
+      document.getElementById('btn-clear').click();
+      break;
+    case 'KeyR':
+      document.getElementById('btn-random').click();
+      break;
+    case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
+    case 'Digit5': case 'Digit6': case 'Digit7': case 'Digit8':
+    case 'Digit9': case 'Digit0':
+      const idx = e.code === 'Digit0' ? 9 : parseInt(e.code.slice(5)) - 1;
+      if(idx < RULES.length){ ruleSelect.value = idx; ruleSelect.dispatchEvent(new Event('change')); }
+      break;
+    case 'Equal': case 'NumpadAdd':
+      camera.zoom = Math.min(camera.zoom * 1.2, 50);
+      break;
+    case 'Minus': case 'NumpadSubtract':
+      camera.zoom = Math.max(camera.zoom / 1.2, 0.25);
+      break;
+    case 'Home':
+      camera = {x:0, y:0, zoom:1};
+      break;
+  }
+});
+
+// ── Touch Support ─────────────────────────────────────────────────
+let lastTouches = [];
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  lastTouches = Array.from(e.touches);
+  if(e.touches.length === 1){
+    const t = e.touches[0];
+    const [gx, gy] = screenToGrid(t.clientX, t.clientY);
+    const pat = patternSelect.value;
+    if(pat === 'draw'){
+      drawing = true;
+      const state = readState();
+      const idx = gy * gridSize + gx;
+      state[idx] = state[idx] > 0.5 ? 0.0 : 1.0;
+      uploadState(state);
+    } else {
+      const state = readState();
+      stampPattern(state, pat, gx, gy);
+      uploadState(state);
+    }
+  }
+}, {passive:false});
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if(e.touches.length === 1 && drawing){
+    const t = e.touches[0];
+    const [gx, gy] = screenToGrid(t.clientX, t.clientY);
+    const state = readState();
+    state[gy * gridSize + gx] = 1.0;
+    uploadState(state);
+  } else if(e.touches.length === 2){
+    drawing = false;
+    const cur = Array.from(e.touches);
+    // Pinch zoom
+    const prevDist = Math.hypot(lastTouches[1].clientX - lastTouches[0].clientX, lastTouches[1].clientY - lastTouches[0].clientY);
+    const curDist  = Math.hypot(cur[1].clientX - cur[0].clientX, cur[1].clientY - cur[0].clientY);
+    if(prevDist > 0) camera.zoom = Math.max(0.25, Math.min(camera.zoom * (curDist / prevDist), 50));
+    // Pan
+    const prevMid = {x:(lastTouches[0].clientX+lastTouches[1].clientX)/2, y:(lastTouches[0].clientY+lastTouches[1].clientY)/2};
+    const curMid  = {x:(cur[0].clientX+cur[1].clientX)/2, y:(cur[0].clientY+cur[1].clientY)/2};
+    const dpr = window.devicePixelRatio || 1;
+    const minDim = Math.min(canvas.width, canvas.height);
+    camera.x -= (curMid.x - prevMid.x) * dpr * gridSize / (minDim * camera.zoom);
+    camera.y += (curMid.y - prevMid.y) * dpr * gridSize / (minDim * camera.zoom);
+    lastTouches = cur;
+  }
+}, {passive:false});
+
+canvas.addEventListener('touchend', () => { drawing = false; lastTouches = []; });
+
+// ── Init ──────────────────────────────────────────────────────────
+resetSim(false);
+updateRuleDisplay();
+requestAnimationFrame(mainLoop);
+</script>
+</body>
+</html>
