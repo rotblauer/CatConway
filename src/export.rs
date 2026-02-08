@@ -32,9 +32,9 @@ pub struct ExportConfig {
 impl Default for ExportConfig {
     fn default() -> Self {
         Self {
-            grid_size: 64,
+            grid_size: 640,
             density: 0.25,
-            generations: 300,
+            generations: 3000,
             output_dir: PathBuf::from("animations"),
             frame_delay: 8,
             cell_scale: 4,
@@ -772,5 +772,12 @@ mod tests {
             "Test",
         );
         // Should not panic.
+    }
+
+    #[test]
+    fn default_config_uses_640_grid_and_3000_generations() {
+        let config = ExportConfig::default();
+        assert_eq!(config.grid_size, 640);
+        assert_eq!(config.generations, 3000);
     }
 }

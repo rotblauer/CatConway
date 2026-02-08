@@ -35,9 +35,9 @@ pub struct SearchConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            grid_size: 64,
+            grid_size: 640,
             density: 0.25,
-            generations: 300,
+            generations: 3000,
             min_variation: 0.05,
             max_period: 20,
             results_path: PathBuf::from("search_results.txt"),
@@ -900,5 +900,12 @@ mod tests {
 
         let _ = fs::remove_file(&results_path);
         let _ = fs::remove_file(&examined_path);
+    }
+
+    #[test]
+    fn default_config_uses_640_grid_and_3000_generations() {
+        let config = SearchConfig::default();
+        assert_eq!(config.grid_size, 640);
+        assert_eq!(config.generations, 3000);
     }
 }
