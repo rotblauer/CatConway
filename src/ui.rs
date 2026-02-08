@@ -364,11 +364,12 @@ pub fn draw_ui(
             });
     }
 
-    // ── Right panel: Metrics scatter plot (when classification is active) ──
+    // ── Right panel: Metrics & UMAP scatter plots (when classification is active) ──
     if classify_info.active && classify_info.classified_count > 0 {
         egui::SidePanel::right("metrics_panel")
             .default_width(320.0)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Metrics Visualization");
                 ui.separator();
 
@@ -425,8 +426,10 @@ pub fn draw_ui(
                 }
 
                 ui.separator();
+                ui.label("💡 Click a point to run that rule");
 
-                egui_plot::Plot::new("metrics_scatter")
+                // Metrics scatter plot with click-to-select.
+                let metrics_response = egui_plot::Plot::new("metrics_scatter")
                     .height(200.0)
                     .x_axis_label(FEATURE_NAMES[x_idx])
                     .y_axis_label(FEATURE_NAMES[y_idx])
@@ -449,7 +452,132 @@ pub fn draw_ui(
                                 plot_ui.points(points);
                             }
                         }
+                        // Return the pointer coordinate if clicked.
+                        if plot_ui.response().clicked() {
+                            plot_ui.pointer_coordinate()
+                        } else {
+                            None
+                        }
                     });
+
+                // Handle click on metrics scatter: find nearest point to click position.
+                if let Some(click_pos) = metrics_response.inner {
+                    let mut best_idx = None;
+                    let mut best_dist = f64::INFINITY;
+                    for (i, r) in classify_info.results.iter().enumerate() {
+                        let fv = r.metrics.feature_vector();
+                        let dx = fv[x_idx] - click_pos.x;
+                        let dy = fv[y_idx] - click_pos.y;
+                        let d = dx * dx + dy * dy;
+                        if d < best_dist {
+                            best_dist = d;
+                            best_idx = Some(i);
+                        }
+                    }
+                    if let Some(idx) = best_idx {
+                        actions.apply_classified_rule = Some(idx);
+                    }
+                }
+
+                // ── UMAP Projection scatter plot ──
+                let has_umap = classify_info
+                    .results
+                    .iter()
+                    .any(|r| r.umap_x.is_some() && r.umap_y.is_some());
+                if has_umap {
+                    ui.separator();
+                    ui.heading("UMAP Projection");
+
+                    // Determine max UMAP cluster index for color assignment.
+                    let max_umap_cluster = classify_info
+                        .results
+                        .iter()
+                        .filter_map(|r| r.umap_cluster)
+                        .max()
+                        .unwrap_or(0);
+
+                    // Generate distinct colors for agnostic UMAP clusters.
+                    let umap_colors: Vec<egui::Color32> = (0..=max_umap_cluster)
+                        .map(|c| {
+                            let hue = (c as f32) / ((max_umap_cluster + 1) as f32);
+                            hsv_to_rgb(hue, 0.8, 0.9)
+                        })
+                        .collect();
+
+                    // Legend for UMAP clusters.
+                    for (c, color) in umap_colors.iter().enumerate() {
+                        let count = classify_info
+                            .results
+                            .iter()
+                            .filter(|r| r.umap_cluster == Some(c))
+                            .count();
+                        if count > 0 {
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(12.0, 12.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(rect, 0.0, *color);
+                                ui.label(format!("Cluster {c}: {count}"));
+                            });
+                        }
+                    }
+
+                    ui.label("💡 Click a point to run that rule");
+
+                    let umap_response = egui_plot::Plot::new("umap_scatter")
+                        .height(200.0)
+                        .x_axis_label("UMAP 1")
+                        .y_axis_label("UMAP 2")
+                        .show(ui, |plot_ui| {
+                            // Plot each UMAP cluster as a separate series.
+                            for (c, color) in umap_colors.iter().enumerate() {
+                                let pts: Vec<[f64; 2]> = classify_info
+                                    .results
+                                    .iter()
+                                    .filter(|r| {
+                                        r.umap_cluster == Some(c)
+                                            && r.umap_x.is_some()
+                                            && r.umap_y.is_some()
+                                    })
+                                    .map(|r| [r.umap_x.unwrap(), r.umap_y.unwrap()])
+                                    .collect();
+                                if !pts.is_empty() {
+                                    let points = Points::new(pts)
+                                        .name(format!("Cluster {c}"))
+                                        .color(*color)
+                                        .radius(3.0);
+                                    plot_ui.points(points);
+                                }
+                            }
+                            // Return the pointer coordinate if clicked.
+                            if plot_ui.response().clicked() {
+                                plot_ui.pointer_coordinate()
+                            } else {
+                                None
+                            }
+                        });
+
+                    // Handle click on UMAP scatter: find nearest point.
+                    if let Some(click_pos) = umap_response.inner {
+                        let mut best_idx = None;
+                        let mut best_dist = f64::INFINITY;
+                        for (i, r) in classify_info.results.iter().enumerate() {
+                            if let (Some(ux), Some(uy)) = (r.umap_x, r.umap_y) {
+                                let dx = ux - click_pos.x;
+                                let dy = uy - click_pos.y;
+                                let d = dx * dx + dy * dy;
+                                if d < best_dist {
+                                    best_dist = d;
+                                    best_idx = Some(i);
+                                }
+                            }
+                        }
+                        if let Some(idx) = best_idx {
+                            actions.apply_classified_rule = Some(idx);
+                        }
+                    }
+                }
 
                 // Clustering controls.
                 ui.separator();
@@ -465,10 +593,33 @@ pub fn draw_ui(
                         }
                     }
                 });
+                });
             });
     }
 
     actions
+}
+
+/// Convert HSV color to an egui Color32. `h` is in [0, 1), `s` and `v` in [0, 1].
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> egui::Color32 {
+    let h6 = (h % 1.0) * 6.0;
+    let sector = (h6 as u32) % 6;
+    let c = v * s;
+    let x = c * (1.0 - (h6 % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match sector {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    egui::Color32::from_rgb(
+        ((r + m) * 255.0) as u8,
+        ((g + m) * 255.0) as u8,
+        ((b + m) * 255.0) as u8,
+    )
 }
 
 /// Draw the classification section within the sidebar.
