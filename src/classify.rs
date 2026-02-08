@@ -897,15 +897,23 @@ pub fn compute_cluster_summaries(
             *m /= n;
         }
 
-        // Compute median.
+        // Compute median using partial sort (O(n) instead of O(n log n)).
         let mut median = [0.0f64; 10];
         for j in 0..10 {
             let mut vals: Vec<f64> = indices.iter().map(|&i| features[i][j]).collect();
-            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = vals.len() / 2;
+            vals.select_nth_unstable_by(mid, |a, b| {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            });
             median[j] = if vals.len() % 2 == 0 {
-                (vals[vals.len() / 2 - 1] + vals[vals.len() / 2]) / 2.0
+                // For even length, also need the element just below mid.
+                let lower = vals[..mid]
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                (lower + vals[mid]) / 2.0
             } else {
-                vals[vals.len() / 2]
+                vals[mid]
             };
         }
 
@@ -1022,13 +1030,19 @@ fn spawn_umap_background(
     }
 
     // Snapshot features under the lock, then release it before the heavy work.
-    let features: Vec<[f64; 10]> = {
+    // The snapshot count is recorded so we only write back to the first N
+    // entries.  The results vector is append-only (new rules are pushed,
+    // never removed or reordered), so the first N entries are guaranteed to
+    // match the features we projected.
+    let (features, snapshot_len): (Vec<[f64; 10]>, usize) = {
         let s = state.lock().unwrap();
         if s.results.len() < 4 {
             umap_running.store(false, Ordering::SeqCst);
             return false;
         }
-        s.results.iter().map(|r| r.metrics.feature_vector()).collect()
+        let feats: Vec<[f64; 10]> = s.results.iter().map(|r| r.metrics.feature_vector()).collect();
+        let len = feats.len();
+        (feats, len)
     };
 
     let state = Arc::clone(state);
@@ -1040,16 +1054,16 @@ fn spawn_umap_background(
             umap_cluster(&features, UMAP_N_NEIGHBORS, n_epochs, k);
         let summaries = compute_cluster_summaries(&features, &umap_assignments);
 
-        // Write results back under the lock.
+        // Write results back under the lock.  Only update the first
+        // snapshot_len entries — these are positionally stable because the
+        // results vector is append-only.  Any results added after the
+        // snapshot simply won't have UMAP coordinates until the next run.
         if let Ok(mut s) = state.lock() {
-            // Only apply if the result count hasn't shrunk (e.g. due to reset).
-            if s.results.len() >= features.len() {
-                for (i, r) in s.results.iter_mut().enumerate() {
-                    if i < projection.coords.len() && i < umap_assignments.len() {
-                        r.umap_x = Some(projection.coords[i][0]);
-                        r.umap_y = Some(projection.coords[i][1]);
-                        r.umap_cluster = Some(umap_assignments[i]);
-                    }
+            if s.results.len() >= snapshot_len {
+                for i in 0..snapshot_len.min(projection.coords.len()).min(umap_assignments.len()) {
+                    s.results[i].umap_x = Some(projection.coords[i][0]);
+                    s.results[i].umap_y = Some(projection.coords[i][1]);
+                    s.results[i].umap_cluster = Some(umap_assignments[i]);
                 }
             }
             s.umap_cluster_summaries = summaries;
