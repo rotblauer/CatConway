@@ -47,6 +47,14 @@ pub struct UiActions {
     pub apply_classified_rule: Option<usize>,
     /// Re-cluster with the specified k.
     pub recluster: Option<usize>,
+    /// Toggle the current rule as a favorite.
+    pub toggle_favorite: bool,
+    /// Apply a favorite rule by its index.
+    pub apply_favorite: Option<usize>,
+    /// Export a GIF animation of the current rule.
+    pub export_current: bool,
+    /// Export GIF animations of all favorite rules.
+    pub export_all_favorites: bool,
 }
 
 /// Persistent state for the egui overlay UI.
@@ -131,6 +139,23 @@ pub struct ClassifyInfo {
     pub cluster_summaries: Vec<ClusterSummary>,
 }
 
+/// Information about favorites for UI display.
+pub struct FavoritesInfo {
+    /// Whether the current rule is favorited.
+    pub is_current_favorite: bool,
+    /// Labels and indices of all favorited rules.
+    pub entries: Vec<String>,
+}
+
+/// Label text for the favorite/unfavorite toggle button.
+fn favorite_button_label(is_favorite: bool) -> &'static str {
+    if is_favorite {
+        "★ Unfavorite Current Rule"
+    } else {
+        "☆ Favorite Current Rule"
+    }
+}
+
 /// Draw the egui overlay UI and return any actions the user triggered.
 pub fn draw_ui(
     ctx: &egui::Context,
@@ -145,6 +170,7 @@ pub fn draw_ui(
     grid_height: u32,
     search_info: &SearchInfo,
     classify_info: &ClassifyInfo,
+    favorites_info: &FavoritesInfo,
 ) -> UiActions {
     let mut actions = UiActions::default();
 
@@ -192,6 +218,42 @@ pub fn draw_ui(
                         actions.load_pattern = Some(idx);
                         ui.close_menu();
                     }
+                }
+            });
+
+            ui.menu_button("Favorites", |ui| {
+                if ui.button(favorite_button_label(favorites_info.is_current_favorite)).clicked() {
+                    actions.toggle_favorite = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if favorites_info.entries.is_empty() {
+                    ui.label("No favorites yet");
+                } else {
+                    for (idx, label) in favorites_info.entries.iter().enumerate() {
+                        if ui.button(format!("★ {label}")).clicked() {
+                            actions.apply_favorite = Some(idx);
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("📹 Export All Favorites as GIF").clicked() {
+                        actions.export_all_favorites = true;
+                        ui.close_menu();
+                    }
+                }
+            });
+
+            ui.menu_button("Export", |ui| {
+                if ui.button("📹 Export Current Rule as GIF").clicked() {
+                    actions.export_current = true;
+                    ui.close_menu();
+                }
+                if !favorites_info.entries.is_empty()
+                    && ui.button("📹 Export All Favorites as GIF").clicked()
+                {
+                    actions.export_all_favorites = true;
+                    ui.close_menu();
                 }
             });
 
@@ -270,6 +332,41 @@ pub fn draw_ui(
                     ui.label(format!("Population: {pop}"));
                     ui.label(format!("Density: {:.1}%", density * 100.0));
                     ui.label(format!("Gen/sec: {rate:.0}"));
+
+                    // ── Favorites ──
+                    ui.separator();
+                    ui.heading("Favorites");
+                    {
+                        if ui.button(favorite_button_label(favorites_info.is_current_favorite)).clicked() {
+                            actions.toggle_favorite = true;
+                        }
+
+                        if !favorites_info.entries.is_empty() {
+                            egui::ScrollArea::vertical()
+                                .id_salt("favorites_scroll")
+                                .max_height(120.0)
+                                .show(ui, |ui| {
+                                    for (idx, label) in
+                                        favorites_info.entries.iter().enumerate()
+                                    {
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("★ {label}"));
+                                            if ui.small_button("Apply").clicked() {
+                                                actions.apply_favorite = Some(idx);
+                                            }
+                                        });
+                                    }
+                                });
+
+                            if ui.button("📹 Export All Favorites").clicked() {
+                                actions.export_all_favorites = true;
+                            }
+                        }
+
+                        if ui.button("📹 Export Current Rule").clicked() {
+                            actions.export_current = true;
+                        }
+                    }
 
                     // ── Rule Search (legacy) ──
                     ui.separator();

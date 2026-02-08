@@ -1,6 +1,8 @@
 mod app;
 mod camera;
 pub mod classify;
+mod export;
+mod favorites;
 mod grid;
 mod renderer;
 pub mod search;

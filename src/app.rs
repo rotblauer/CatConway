@@ -11,6 +11,8 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::camera::Camera;
 use crate::classify::{self, ClassifyHandle};
+use crate::export::{self, ExportConfig, RuleContext};
+use crate::favorites::Favorites;
 use crate::grid::{
     Grid, Rules, pattern_acorn, pattern_glider, pattern_gosper_gun, pattern_lwss,
     pattern_r_pentomino,
@@ -19,7 +21,7 @@ use crate::renderer::Renderer;
 use crate::search::{self, SearchHandle};
 use crate::simulation::Simulation;
 use crate::stats::{SamplingBridge, Stats, spawn_sampling_thread};
-use crate::ui::{self, ClassifyInfo, PatternInfo, RuleInfo, SearchInfo, UiState};
+use crate::ui::{self, ClassifyInfo, FavoritesInfo, PatternInfo, RuleInfo, SearchInfo, UiState};
 
 /// Default grid dimension (square).
 const DEFAULT_GRID_SIZE: u32 = 1024;
@@ -62,6 +64,8 @@ pub struct App {
     search_handle: Option<SearchHandle>,
     /// Background behavior classification handle.
     classify_handle: Option<ClassifyHandle>,
+    /// Favorites store.
+    favorites: Favorites,
 }
 
 struct GpuState {
@@ -135,6 +139,7 @@ impl App {
             ui_state: UiState::new(DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE),
             search_handle: None,
             classify_handle: None,
+            favorites: Favorites::new(),
         }
     }
 
@@ -336,6 +341,16 @@ impl App {
                 }
             };
 
+            let favorites_info = FavoritesInfo {
+                is_current_favorite: self.favorites.is_favorite(&self.grid.rules),
+                entries: self
+                    .favorites
+                    .entries()
+                    .iter()
+                    .map(|f| f.label.clone())
+                    .collect(),
+            };
+
             let actions = ui::draw_ui(
                 &gpu.egui_ctx,
                 &mut self.ui_state,
@@ -349,6 +364,7 @@ impl App {
                 self.grid.height,
                 &search_info,
                 &classify_info,
+                &favorites_info,
             );
 
             let egui_output = gpu.egui_ctx.end_pass();
@@ -624,6 +640,76 @@ impl App {
             if let Some(ref handle) = self.classify_handle {
                 handle.recluster(k);
                 log::info!("Re-clustered with k={k}");
+            }
+        }
+
+        // ── Favorites actions ──
+        if actions.toggle_favorite {
+            let is_now = self.favorites.toggle(&self.grid.rules);
+            let label = search::rules_to_label(&self.grid.rules);
+            if is_now {
+                log::info!("Added to favorites: {label}");
+            } else {
+                log::info!("Removed from favorites: {label}");
+            }
+        }
+        if let Some(idx) = actions.apply_favorite {
+            let entries = self.favorites.entries().to_vec();
+            if let Some(fav) = entries.get(idx) {
+                self.grid.rules = fav.rules;
+                self.current_rule_idx = usize::MAX;
+                self.grid.randomize(INITIAL_DENSITY);
+                self.upload_grid();
+                self.stats.clear();
+                log::info!("Applied favorite rule: {}", fav.label);
+            }
+        }
+
+        // ── Export actions ──
+        if actions.export_current || actions.export_all_favorites {
+            // Build classification context for the scatter plot overlay.
+            let context = if let Some(ref handle) = self.classify_handle {
+                RuleContext {
+                    classified_rules: handle.results(),
+                    scatter_x: self.ui_state.scatter_x,
+                    scatter_y: self.ui_state.scatter_y,
+                }
+            } else {
+                RuleContext::default()
+            };
+            let config = ExportConfig::default();
+
+            if actions.export_current {
+                match export::export_gif(&self.grid.rules, &config, &context) {
+                    Ok(result) => {
+                        log::info!(
+                            "Exported GIF: {} ({} frames) → {}",
+                            result.label,
+                            result.total_frames,
+                            result.path.display()
+                        );
+                    }
+                    Err(e) => log::error!("Export failed: {e}"),
+                }
+            }
+            if actions.export_all_favorites {
+                let entries = self.favorites.entries().to_vec();
+                let rules_list: Vec<(String, Rules)> = entries
+                    .iter()
+                    .map(|f| (f.label.clone(), f.rules))
+                    .collect();
+                let results = export::export_multiple(&rules_list, &config, &context);
+                for result in results {
+                    match result {
+                        Ok(r) => log::info!(
+                            "Exported GIF: {} ({} frames) → {}",
+                            r.label,
+                            r.total_frames,
+                            r.path.display()
+                        ),
+                        Err(e) => log::error!("Export failed: {e}"),
+                    }
+                }
             }
         }
     }
