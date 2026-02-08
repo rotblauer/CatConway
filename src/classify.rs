@@ -16,6 +16,9 @@ use crate::search::{cpu_step, parse_rule_label, rules_to_label};
 
 // ── Behavioral metrics ──────────────────────────────────────────────────────
 
+/// Number of behavioral features in the metric vector.
+pub const NUM_FEATURES: usize = 14;
+
 /// A comprehensive set of behavioral metrics computed after a burn-in period.
 #[derive(Debug, Clone)]
 pub struct RuleMetrics {
@@ -40,11 +43,28 @@ pub struct RuleMetrics {
     pub monotonic_fraction: f64,
     /// Roughness: mean absolute difference between consecutive densities.
     pub roughness: f64,
+    /// Langton's λ parameter: fraction of rule-table entries mapping to a
+    /// non-quiescent (alive) state. Values near 0 produce ordered dynamics,
+    /// values near 1 produce chaos, and complex behavior concentrates near
+    /// a critical λ ≈ 0.3 (Langton 1990).
+    pub langton_lambda: f64,
+    /// Mean fraction of cells that change state per generation (post-burn-in).
+    /// Zero for still-lifes, moderate for complex dynamics, high for chaos.
+    pub activity: f64,
+    /// Shannon entropy of 2×2 block patterns on the grid, averaged over
+    /// post-burn-in snapshots. Measures spatial complexity — low for uniform
+    /// or simple repeating structures, high for disordered configurations.
+    pub spatial_entropy: f64,
+    /// Damage-spreading exponent: normalized Hamming distance growth rate
+    /// between twin simulations diverging from a single-cell perturbation.
+    /// Positive values indicate chaotic sensitivity; near-zero indicates
+    /// ordered/robust dynamics (Bagnoli et al. 1992).
+    pub damage_spreading: f64,
 }
 
 impl RuleMetrics {
     /// Return metrics as a feature vector for clustering.
-    pub fn feature_vector(&self) -> [f64; 10] {
+    pub fn feature_vector(&self) -> [f64; NUM_FEATURES] {
         [
             self.variation,
             self.mean_density,
@@ -56,12 +76,16 @@ impl RuleMetrics {
             self.dominant_period as f64,
             self.monotonic_fraction,
             self.roughness,
+            self.langton_lambda,
+            self.activity,
+            self.spatial_entropy,
+            self.damage_spreading,
         ]
     }
 }
 
 /// Feature names corresponding to `feature_vector()` indices.
-pub const FEATURE_NAMES: [&str; 10] = [
+pub const FEATURE_NAMES: [&str; NUM_FEATURES] = [
     "variation",
     "mean_density",
     "final_density",
@@ -72,6 +96,10 @@ pub const FEATURE_NAMES: [&str; 10] = [
     "dominant_period",
     "monotonic_fraction",
     "roughness",
+    "langton_lambda",
+    "activity",
+    "spatial_entropy",
+    "damage_spreading",
 ];
 
 // ── Behavior classification ─────────────────────────────────────────────────
@@ -252,19 +280,65 @@ pub fn compute_metrics(rules: &Rules, config: &ClassifyConfig) -> RuleMetrics {
     }
 
     let mut densities: Vec<f64> = Vec::with_capacity(config.generations as usize);
+    let mut change_counts: Vec<u64> = Vec::new();
+    let mut spatial_samples: Vec<f64> = Vec::new();
+    let mut damage_spread_value = 0.0f64;
+    let mut prev_cells: Option<Vec<u32>> = None;
 
-    for _step in 0..config.generations {
+    // Sample spatial entropy every N steps after burn-in to amortize cost.
+    let spatial_sample_interval = 20u32;
+
+    for step in 0..config.generations {
         let pop: u64 = cells.iter().map(|&c| u64::from(c)).sum();
         densities.push(pop as f64 / total_f);
 
-        if pop == 0 && _step > config.burn_in {
+        if pop == 0 && step > config.burn_in {
             break;
         }
 
-        cells = cpu_step(&cells, size, size, rules);
+        let next = cpu_step(&cells, size, size, rules);
+
+        // Track cell changes (activity) after burn-in.
+        if step >= config.burn_in {
+            if let Some(ref prev) = prev_cells {
+                let changes: u64 = prev
+                    .iter()
+                    .zip(next.iter())
+                    .map(|(&a, &b)| u64::from(a != b))
+                    .sum();
+                change_counts.push(changes);
+            }
+
+            // Sample spatial entropy periodically.
+            if (step - config.burn_in) % spatial_sample_interval == 0 {
+                spatial_samples.push(compute_spatial_entropy(&next, size, size));
+            }
+        }
+
+        // Launch twin simulation at the burn-in boundary.
+        if step == config.burn_in {
+            damage_spread_value =
+                compute_damage_spreading(&cells, size, size, rules);
+        }
+
+        prev_cells = Some(cells);
+        cells = next;
     }
 
-    compute_metrics_from_trace(&densities, config.burn_in as usize, config.max_period)
+    let mut metrics =
+        compute_metrics_from_trace(&densities, config.burn_in as usize, config.max_period);
+
+    // Fill in simulation-derived metrics that the trace-only function cannot compute.
+    metrics.langton_lambda = langton_lambda(rules);
+    metrics.activity = compute_activity(&change_counts, total as u64);
+    metrics.spatial_entropy = if spatial_samples.is_empty() {
+        0.0
+    } else {
+        spatial_samples.iter().sum::<f64>() / spatial_samples.len() as f64
+    };
+    metrics.damage_spreading = damage_spread_value;
+
+    metrics
 }
 
 /// Compute all behavioral metrics from a density trace, using the portion
@@ -289,6 +363,10 @@ pub fn compute_metrics_from_trace(
             dominant_period: 0,
             monotonic_fraction: 0.0,
             roughness: 0.0,
+            langton_lambda: 0.0,
+            activity: 0.0,
+            spatial_entropy: 0.0,
+            damage_spreading: 0.0,
         };
     }
 
@@ -333,6 +411,10 @@ pub fn compute_metrics_from_trace(
         dominant_period,
         monotonic_fraction,
         roughness,
+        langton_lambda: 0.0,
+        activity: 0.0,
+        spatial_entropy: 0.0,
+        damage_spreading: 0.0,
     }
 }
 
@@ -465,11 +547,150 @@ fn compute_roughness(data: &[f64]) -> f64 {
     sum / (data.len() - 1) as f64
 }
 
+// ── Langton's λ parameter ───────────────────────────────────────────────────
+
+/// Compute Langton's λ parameter for an outer-totalistic rule.
+///
+/// λ is the fraction of (state, neighbor-count) entries in the rule table that
+/// map to the alive state.  For outer-totalistic rules with a Moore
+/// neighborhood of radius r, there are 2×(max_neighbors+1) entries (birth
+/// and survival for each possible neighbor count 0..=max_neighbors).
+///
+/// Langton (1990) showed that complex behavior concentrates near a critical
+/// λ value (~0.3 for many systems), with ordered dynamics below and chaotic
+/// dynamics above.
+pub fn langton_lambda(rules: &Rules) -> f64 {
+    let max_n = {
+        let side = 2 * rules.radius + 1;
+        side * side - 1
+    };
+    let total_entries = 2 * (max_n + 1);
+    let alive_entries = (0..=max_n)
+        .filter(|&i| (rules.birth >> i) & 1 == 1)
+        .count()
+        + (0..=max_n)
+            .filter(|&i| (rules.survival >> i) & 1 == 1)
+            .count();
+    alive_entries as f64 / total_entries as f64
+}
+
+// ── Activity (cell volatility) ──────────────────────────────────────────────
+
+/// Compute the mean activity (fraction of cells that change state) from a
+/// sequence of per-step change counts and the total cell count.
+fn compute_activity(change_counts: &[u64], total_cells: u64) -> f64 {
+    if change_counts.is_empty() || total_cells == 0 {
+        return 0.0;
+    }
+    let mean_changes = change_counts.iter().sum::<u64>() as f64 / change_counts.len() as f64;
+    mean_changes / total_cells as f64
+}
+
+// ── Spatial entropy (2×2 block patterns) ────────────────────────────────────
+
+/// Compute the Shannon entropy of 2×2 block patterns on a grid.
+///
+/// The grid is scanned with a 2×2 sliding window, each pattern is mapped to
+/// one of 16 possible configurations (2⁴), and the Shannon entropy of the
+/// resulting distribution is computed.  High values indicate spatial disorder;
+/// low values indicate uniform or highly structured configurations.
+fn compute_spatial_entropy(cells: &[u32], width: u32, height: u32) -> f64 {
+    if width < 2 || height < 2 {
+        return 0.0;
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let mut counts = [0u64; 16];
+    let mut total = 0u64;
+
+    for y in 0..h - 1 {
+        for x in 0..w - 1 {
+            let pattern = (cells[y * w + x] & 1)
+                | ((cells[y * w + x + 1] & 1) << 1)
+                | ((cells[(y + 1) * w + x] & 1) << 2)
+                | ((cells[(y + 1) * w + x + 1] & 1) << 3);
+            counts[pattern as usize] += 1;
+            total += 1;
+        }
+    }
+
+    if total == 0 {
+        return 0.0;
+    }
+
+    let mut entropy = 0.0f64;
+    for &c in &counts {
+        if c > 0 {
+            let p = c as f64 / total as f64;
+            entropy -= p * p.ln();
+        }
+    }
+    entropy
+}
+
+// ── Damage spreading (Lyapunov exponent analogue) ───────────────────────────
+
+/// Number of generations to run twin simulations for damage spreading.
+const DAMAGE_SPREADING_STEPS: u32 = 50;
+
+/// Estimate the damage-spreading exponent by running twin simulations from
+/// a single-cell perturbation.
+///
+/// Starting from a given grid state, a copy is made with one cell flipped.
+/// Both grids are advanced for `DAMAGE_SPREADING_STEPS` generations and the
+/// normalized Hamming distance (fraction of differing cells) is tracked.
+/// The returned value is the mean normalized Hamming distance over the
+/// observation window — a proxy for the largest Lyapunov exponent.
+///
+/// Values near zero indicate ordered (damage-healing) dynamics; positive
+/// values indicate chaotic (damage-spreading) dynamics.  Complex/edge-of-chaos
+/// rules typically show intermediate values.
+fn compute_damage_spreading(
+    initial_cells: &[u32],
+    width: u32,
+    height: u32,
+    rules: &Rules,
+) -> f64 {
+    let total = initial_cells.len();
+    if total == 0 {
+        return 0.0;
+    }
+
+    // Create perturbed twin: flip the center cell.
+    let mut twin = initial_cells.to_vec();
+    let center = (height / 2) as usize * width as usize + (width / 2) as usize;
+    if center < twin.len() {
+        twin[center] ^= 1;
+    }
+
+    let mut original = initial_cells.to_vec();
+    let mut distances = Vec::with_capacity(DAMAGE_SPREADING_STEPS as usize);
+
+    for _ in 0..DAMAGE_SPREADING_STEPS {
+        original = cpu_step(&original, width, height, rules);
+        twin = cpu_step(&twin, width, height, rules);
+
+        let hamming: u64 = original
+            .iter()
+            .zip(twin.iter())
+            .map(|(&a, &b)| u64::from(a != b))
+            .sum();
+        distances.push(hamming as f64 / total as f64);
+    }
+
+    // Return mean normalized Hamming distance.
+    if distances.is_empty() {
+        0.0
+    } else {
+        distances.iter().sum::<f64>() / distances.len() as f64
+    }
+}
+
 // ── Simple k-means clustering ───────────────────────────────────────────────
 
 /// Run k-means clustering on feature vectors and return cluster assignments.
 /// Features are normalized (z-score) before clustering.
-pub fn kmeans_cluster(features: &[[f64; 10]], k: usize, max_iter: usize) -> Vec<usize> {
+pub fn kmeans_cluster(features: &[[f64; NUM_FEATURES]], k: usize, max_iter: usize) -> Vec<usize> {
     let n = features.len();
     if n == 0 || k == 0 {
         return vec![];
@@ -546,7 +767,7 @@ pub fn kmeans_cluster(features: &[[f64; 10]], k: usize, max_iter: usize) -> Vec<
         }
 
         // Recompute centroids.
-        let mut new_centroids = vec![[0.0f64; 10]; k];
+        let mut new_centroids = vec![[0.0f64; NUM_FEATURES]; k];
         let mut counts = vec![0usize; k];
         for (i, point) in normalized.iter().enumerate() {
             let c = assignments[i];
@@ -557,7 +778,7 @@ pub fn kmeans_cluster(features: &[[f64; 10]], k: usize, max_iter: usize) -> Vec<
         }
         for c in 0..k {
             if counts[c] > 0 {
-                for j in 0..10 {
+                for j in 0..NUM_FEATURES {
                     new_centroids[c][j] /= counts[c] as f64;
                 }
             }
@@ -568,17 +789,17 @@ pub fn kmeans_cluster(features: &[[f64; 10]], k: usize, max_iter: usize) -> Vec<
     assignments
 }
 
-fn squared_dist(a: &[f64; 10], b: &[f64; 10]) -> f64 {
+fn squared_dist(a: &[f64; NUM_FEATURES], b: &[f64; NUM_FEATURES]) -> f64 {
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (x - y).powi(2))
         .sum()
 }
 
-fn normalize_features(features: &[[f64; 10]]) -> (Vec<[f64; 10]>, [f64; 10], [f64; 10]) {
+fn normalize_features(features: &[[f64; NUM_FEATURES]]) -> (Vec<[f64; NUM_FEATURES]>, [f64; NUM_FEATURES], [f64; NUM_FEATURES]) {
     let n = features.len() as f64;
-    let mut means = [0.0f64; 10];
-    let mut stddevs = [0.0f64; 10];
+    let mut means = [0.0f64; NUM_FEATURES];
+    let mut stddevs = [0.0f64; NUM_FEATURES];
 
     for f in features {
         for (j, &v) in f.iter().enumerate() {
@@ -601,10 +822,10 @@ fn normalize_features(features: &[[f64; 10]]) -> (Vec<[f64; 10]>, [f64; 10], [f6
         }
     }
 
-    let normalized: Vec<[f64; 10]> = features
+    let normalized: Vec<[f64; NUM_FEATURES]> = features
         .iter()
         .map(|f| {
-            let mut norm = [0.0f64; 10];
+            let mut norm = [0.0f64; NUM_FEATURES];
             for (j, &v) in f.iter().enumerate() {
                 norm[j] = (v - means[j]) / stddevs[j];
             }
@@ -636,14 +857,14 @@ pub struct UmapProjection {
     pub coords: Vec<[f64; 2]>,
 }
 
-/// Run UMAP on 10-dimensional feature vectors, returning a 2D projection.
+/// Run UMAP on high-dimensional feature vectors, returning a 2D projection.
 ///
 /// This is a simplified implementation of UMAP (Uniform Manifold Approximation
 /// and Projection) suitable for interactive visualization. It constructs a
 /// fuzzy k-nearest-neighbor graph in high-dimensional space and optimizes a
 /// low-dimensional embedding using stochastic gradient descent with
 /// attractive/repulsive forces.
-pub fn umap_project(features: &[[f64; 10]], n_neighbors: usize, n_epochs: usize) -> UmapProjection {
+pub fn umap_project(features: &[[f64; NUM_FEATURES]], n_neighbors: usize, n_epochs: usize) -> UmapProjection {
     let n = features.len();
     if n < 2 {
         return UmapProjection {
@@ -818,7 +1039,7 @@ fn find_sigma(neighbors: &[(usize, f64)], rho: f64, target: f64) -> f64 {
 /// Run UMAP projection and then k-means on the 2D projection to produce
 /// agnostic cluster assignments. Returns (projection, cluster_assignments).
 pub fn umap_cluster(
-    features: &[[f64; 10]],
+    features: &[[f64; NUM_FEATURES]],
     n_neighbors: usize,
     n_epochs: usize,
     k: usize,
@@ -828,12 +1049,12 @@ pub fn umap_cluster(
         return (projection, vec![0; features.len()]);
     }
 
-    // Convert 2D coords to [f64; 10] for reuse of kmeans_cluster (pad with zeros).
-    let padded: Vec<[f64; 10]> = projection
+    // Convert 2D coords to [f64; NUM_FEATURES] for reuse of kmeans_cluster (pad with zeros).
+    let padded: Vec<[f64; NUM_FEATURES]> = projection
         .coords
         .iter()
         .map(|&[x, y]| {
-            let mut v = [0.0f64; 10];
+            let mut v = [0.0f64; NUM_FEATURES];
             v[0] = x;
             v[1] = y;
             v
@@ -855,9 +1076,9 @@ pub struct ClusterSummary {
     /// Number of rules in this cluster.
     pub count: usize,
     /// Per-feature mean values (indexed by FEATURE_NAMES).
-    pub mean_metrics: [f64; 10],
+    pub mean_metrics: [f64; NUM_FEATURES],
     /// Per-feature median values (indexed by FEATURE_NAMES).
-    pub median_metrics: [f64; 10],
+    pub median_metrics: [f64; NUM_FEATURES],
     /// Human-readable interpretation of the cluster character.
     pub interpretation: String,
 }
@@ -865,7 +1086,7 @@ pub struct ClusterSummary {
 /// Compute per-cluster summaries (mean, median, interpretation) for the given
 /// UMAP cluster assignments and feature vectors.
 pub fn compute_cluster_summaries(
-    features: &[[f64; 10]],
+    features: &[[f64; NUM_FEATURES]],
     assignments: &[usize],
 ) -> Vec<ClusterSummary> {
     if features.is_empty() || assignments.is_empty() {
@@ -888,7 +1109,7 @@ pub fn compute_cluster_summaries(
         let n = count as f64;
 
         // Compute mean.
-        let mut mean = [0.0f64; 10];
+        let mut mean = [0.0f64; NUM_FEATURES];
         for &i in &indices {
             for (j, &v) in features[i].iter().enumerate() {
                 mean[j] += v;
@@ -899,8 +1120,8 @@ pub fn compute_cluster_summaries(
         }
 
         // Compute median using partial sort (O(n) instead of O(n log n)).
-        let mut median = [0.0f64; 10];
-        for j in 0..10 {
+        let mut median = [0.0f64; NUM_FEATURES];
+        for j in 0..NUM_FEATURES {
             let mut vals: Vec<f64> = indices.iter().map(|&i| features[i][j]).collect();
             let mid = vals.len() / 2;
             vals.select_nth_unstable_by(mid, |a, b| {
@@ -942,7 +1163,7 @@ pub fn compute_cluster_summaries(
 /// - **entropy**: high (>2.5) → high complexity, low (<0.5) → predictable
 /// - **dominant_period**: >0 → periodic oscillation detected
 /// - **roughness**: high (>0.02) → jagged/noisy, low (<0.005) → smooth
-fn interpret_cluster(mean: &[f64; 10]) -> String {
+fn interpret_cluster(mean: &[f64; NUM_FEATURES]) -> String {
     // Indices: 0=variation, 1=mean_density, 2=final_density, 3=density_range,
     //          4=trend, 5=autocorrelation, 6=entropy, 7=dominant_period,
     //          8=monotonic_fraction, 9=roughness
@@ -1003,6 +1224,38 @@ fn interpret_cluster(mean: &[f64; 10]) -> String {
         traits.push("smooth");
     }
 
+    // Langton λ-based description
+    let lambda = mean[10];
+    if lambda > 0.4 {
+        traits.push("high-λ");
+    } else if lambda < 0.15 {
+        traits.push("low-λ");
+    }
+
+    // Activity-based description
+    let activity = mean[11];
+    if activity > 0.3 {
+        traits.push("highly active");
+    } else if activity < 0.01 {
+        traits.push("quiescent");
+    }
+
+    // Spatial entropy-based description
+    let spatial_ent = mean[12];
+    if spatial_ent > 2.0 {
+        traits.push("spatially disordered");
+    } else if spatial_ent < 0.5 {
+        traits.push("spatially structured");
+    }
+
+    // Damage spreading-based description
+    let damage = mean[13];
+    if damage > 0.1 {
+        traits.push("damage-spreading");
+    } else if damage < 0.01 {
+        traits.push("damage-healing");
+    }
+
     if traits.is_empty() {
         "mixed dynamics".to_string()
     } else {
@@ -1035,13 +1288,13 @@ fn spawn_umap_background(
     // entries.  The results vector is append-only (new rules are pushed,
     // never removed or reordered), so the first N entries are guaranteed to
     // match the features we projected.
-    let (features, snapshot_len): (Vec<[f64; 10]>, usize) = {
+    let (features, snapshot_len): (Vec<[f64; NUM_FEATURES]>, usize) = {
         let s = state.lock().unwrap();
         if s.results.len() < 4 {
             umap_running.store(false, Ordering::SeqCst);
             return false;
         }
-        let feats: Vec<[f64; 10]> = s.results.iter().map(|r| r.metrics.feature_vector()).collect();
+        let feats: Vec<[f64; NUM_FEATURES]> = s.results.iter().map(|r| r.metrics.feature_vector()).collect();
         let len = feats.len();
         (feats, len)
     };
@@ -1155,7 +1408,7 @@ impl ClassifyHandle {
             if s.results.is_empty() {
                 return;
             }
-            let features: Vec<[f64; 10]> =
+            let features: Vec<[f64; NUM_FEATURES]> =
                 s.results.iter().map(|r| r.metrics.feature_vector()).collect();
             let assignments = kmeans_cluster(&features, k, 50);
             for (i, r) in s.results.iter_mut().enumerate() {
@@ -1189,7 +1442,7 @@ impl ClassifyHandle {
 
 const RESULTS_HEADER: &str = "\
 # CatConway Classified Rule Results
-# Format: B<birth>/S<survival>[/R<radius>] class=<Class> variation=<v> mean_density=<md> final_density=<fd> density_range=<dr> trend=<t> autocorrelation=<ac> entropy=<e> dominant_period=<dp> monotonic_fraction=<mf> roughness=<r>
+# Format: B<birth>/S<survival>[/R<radius>] class=<Class> variation=<v> mean_density=<md> final_density=<fd> density_range=<dr> trend=<t> autocorrelation=<ac> entropy=<e> dominant_period=<dp> monotonic_fraction=<mf> roughness=<r> langton_lambda=<ll> activity=<a> spatial_entropy=<se> damage_spreading=<ds>
 ";
 
 fn ensure_header(path: &Path) {
@@ -1206,7 +1459,7 @@ fn append_classified_result(path: &Path, result: &ClassifiedRule) {
         let m = &result.metrics;
         let _ = writeln!(
             f,
-            "{} class={} variation={:.6} mean_density={:.6} final_density={:.6} density_range={:.6} trend={:.8} autocorrelation={:.6} entropy={:.6} dominant_period={} monotonic_fraction={:.6} roughness={:.8}",
+            "{} class={} variation={:.6} mean_density={:.6} final_density={:.6} density_range={:.6} trend={:.8} autocorrelation={:.6} entropy={:.6} dominant_period={} monotonic_fraction={:.6} roughness={:.8} langton_lambda={:.6} activity={:.8} spatial_entropy={:.6} damage_spreading={:.8}",
             result.label,
             result.behavior,
             m.variation,
@@ -1219,6 +1472,10 @@ fn append_classified_result(path: &Path, result: &ClassifiedRule) {
             m.dominant_period,
             m.monotonic_fraction,
             m.roughness,
+            m.langton_lambda,
+            m.activity,
+            m.spatial_entropy,
+            m.damage_spreading,
         );
     }
 }
@@ -1286,6 +1543,10 @@ fn parse_classified_line(line: &str) -> Option<ClassifiedRule> {
     let mut dominant_period = 0usize;
     let mut monotonic_fraction = 0.0;
     let mut roughness = 0.0;
+    let mut langton_lambda = 0.0;
+    let mut activity = 0.0;
+    let mut spatial_entropy = 0.0;
+    let mut damage_spreading = 0.0;
 
     for part in &parts[1..] {
         if let Some((key, val)) = part.split_once('=') {
@@ -1305,6 +1566,10 @@ fn parse_classified_line(line: &str) -> Option<ClassifiedRule> {
                 "dominant_period" => dominant_period = val.parse().unwrap_or(0),
                 "monotonic_fraction" => monotonic_fraction = val.parse().unwrap_or(0.0),
                 "roughness" => roughness = val.parse().unwrap_or(0.0),
+                "langton_lambda" => langton_lambda = val.parse().unwrap_or(0.0),
+                "activity" => activity = val.parse().unwrap_or(0.0),
+                "spatial_entropy" => spatial_entropy = val.parse().unwrap_or(0.0),
+                "damage_spreading" => damage_spreading = val.parse().unwrap_or(0.0),
                 _ => {}
             }
         }
@@ -1324,6 +1589,10 @@ fn parse_classified_line(line: &str) -> Option<ClassifiedRule> {
             dominant_period,
             monotonic_fraction,
             roughness,
+            langton_lambda,
+            activity,
+            spatial_entropy,
+            damage_spreading,
         },
         behavior: class,
         cluster: None,
@@ -1484,7 +1753,7 @@ fn run_classify(
                 if crossed_threshold(batch_count, batch_len, RECLUSTER_BATCH_SIZE) {
                     let s = state.lock().unwrap();
                     if s.results.len() >= 8 {
-                        let features: Vec<[f64; 10]> =
+                        let features: Vec<[f64; NUM_FEATURES]> =
                             s.results.iter().map(|r| r.metrics.feature_vector()).collect();
                         drop(s);
                         let k = 8.min(features.len());
@@ -1566,7 +1835,7 @@ fn run_classify(
     {
         let mut s = state.lock().unwrap();
         if s.results.len() >= 8 {
-            let features: Vec<[f64; 10]> =
+            let features: Vec<[f64; NUM_FEATURES]> =
                 s.results.iter().map(|r| r.metrics.feature_vector()).collect();
             let k = 8.min(features.len());
             let assignments = kmeans_cluster(&features, k, 50);
@@ -1670,6 +1939,10 @@ mod tests {
             dominant_period: 0,
             monotonic_fraction: 0.5,
             roughness: 0.001,
+            langton_lambda: 0.0,
+            activity: 0.0,
+            spatial_entropy: 0.0,
+            damage_spreading: 0.0,
         };
         assert_eq!(classify(&m), BehaviorClass::Static);
     }
@@ -1687,6 +1960,10 @@ mod tests {
             dominant_period: 0,
             monotonic_fraction: 0.7,
             roughness: 0.01,
+            langton_lambda: 0.0,
+            activity: 0.0,
+            spatial_entropy: 0.0,
+            damage_spreading: 0.0,
         };
         assert_eq!(classify(&m), BehaviorClass::Growing);
     }
@@ -1704,6 +1981,10 @@ mod tests {
             dominant_period: 0,
             monotonic_fraction: 0.7,
             roughness: 0.01,
+            langton_lambda: 0.0,
+            activity: 0.0,
+            spatial_entropy: 0.0,
+            damage_spreading: 0.0,
         };
         assert_eq!(classify(&m), BehaviorClass::Declining);
     }
@@ -1721,6 +2002,10 @@ mod tests {
             dominant_period: 0,
             monotonic_fraction: 0.5,
             roughness: 0.05,
+            langton_lambda: 0.0,
+            activity: 0.0,
+            spatial_entropy: 0.0,
+            damage_spreading: 0.0,
         };
         assert_eq!(classify(&m), BehaviorClass::Chaotic);
     }
@@ -1735,7 +2020,7 @@ mod tests {
 
     #[test]
     fn kmeans_single_point() {
-        let features = vec![[1.0; 10]];
+        let features = vec![[1.0; NUM_FEATURES]];
         let result = kmeans_cluster(&features, 1, 10);
         assert_eq!(result, vec![0]);
     }
@@ -1745,11 +2030,11 @@ mod tests {
         let mut features = Vec::new();
         // Cluster A: all values near 0.
         for _ in 0..10 {
-            features.push([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            features.push([0.0; NUM_FEATURES]);
         }
         // Cluster B: all values near 10.
         for _ in 0..10 {
-            features.push([10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]);
+            features.push([10.0; NUM_FEATURES]);
         }
         let result = kmeans_cluster(&features, 2, 50);
         assert_eq!(result.len(), 20);
@@ -1826,9 +2111,13 @@ mod tests {
             dominant_period: 5,
             monotonic_fraction: 0.6,
             roughness: 0.01,
+            langton_lambda: 0.0,
+            activity: 0.0,
+            spatial_entropy: 0.0,
+            damage_spreading: 0.0,
         };
-        assert_eq!(m.feature_vector().len(), 10);
-        assert_eq!(FEATURE_NAMES.len(), 10);
+        assert_eq!(m.feature_vector().len(), NUM_FEATURES);
+        assert_eq!(FEATURE_NAMES.len(), NUM_FEATURES);
     }
 
     // ── Behavior class ──
@@ -1874,6 +2163,10 @@ mod tests {
                 dominant_period: 0,
                 monotonic_fraction: 0.4,
                 roughness: 0.005,
+                langton_lambda: 0.0,
+                activity: 0.0,
+                spatial_entropy: 0.0,
+                damage_spreading: 0.0,
             },
             behavior: BehaviorClass::Complex,
             cluster: None,
@@ -1990,6 +2283,10 @@ mod tests {
                 dominant_period: 0,
                 monotonic_fraction: 0.4,
                 roughness: 0.005,
+                langton_lambda: 0.0,
+                activity: 0.0,
+                spatial_entropy: 0.0,
+                damage_spreading: 0.0,
             },
             behavior: BehaviorClass::Complex,
             cluster: None,
@@ -2071,7 +2368,7 @@ mod tests {
 
     #[test]
     fn umap_single_point_returns_origin() {
-        let features = vec![[1.0; 10]];
+        let features = vec![[1.0; NUM_FEATURES]];
         let proj = umap_project(&features, 5, 50);
         assert_eq!(proj.coords.len(), 1);
         assert_eq!(proj.coords[0], [0.0, 0.0]);
@@ -2079,7 +2376,7 @@ mod tests {
 
     #[test]
     fn umap_empty_returns_empty() {
-        let features: Vec<[f64; 10]> = vec![];
+        let features: Vec<[f64; NUM_FEATURES]> = vec![];
         let proj = umap_project(&features, 5, 50);
         assert!(proj.coords.is_empty());
     }
@@ -2089,11 +2386,11 @@ mod tests {
         let mut features = Vec::new();
         // Cluster A: near 0.
         for _ in 0..10 {
-            features.push([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            features.push([0.0; NUM_FEATURES]);
         }
         // Cluster B: near 10.
         for _ in 0..10 {
-            features.push([10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]);
+            features.push([10.0; NUM_FEATURES]);
         }
         let proj = umap_project(&features, 5, 200);
         assert_eq!(proj.coords.len(), 20);
@@ -2121,7 +2418,7 @@ mod tests {
         let mut features = Vec::new();
         for i in 0..20 {
             let v = i as f64;
-            features.push([v, v, v, v, v, v, v, v, v, v]);
+            features.push([v; NUM_FEATURES]);
         }
         let (proj, assignments) = umap_cluster(&features, 5, 100, 3);
         assert_eq!(proj.coords.len(), 20);
@@ -2150,8 +2447,8 @@ mod tests {
     #[test]
     fn cluster_summaries_single_cluster() {
         let features = vec![
-            [0.2, 0.5, 0.4, 0.1, 0.001, 0.8, 2.0, 0.0, 0.6, 0.01],
-            [0.3, 0.6, 0.5, 0.2, 0.002, 0.7, 2.5, 0.0, 0.5, 0.02],
+            [0.2, 0.5, 0.4, 0.1, 0.001, 0.8, 2.0, 0.0, 0.6, 0.01, 0.0, 0.0, 0.0, 0.0],
+            [0.3, 0.6, 0.5, 0.2, 0.002, 0.7, 2.5, 0.0, 0.5, 0.02, 0.0, 0.0, 0.0, 0.0],
         ];
         let assignments = vec![0, 0];
         let summaries = compute_cluster_summaries(&features, &assignments);
@@ -2168,8 +2465,8 @@ mod tests {
     #[test]
     fn cluster_summaries_two_clusters() {
         let features = vec![
-            [0.005, 0.5, 0.5, 0.01, 0.0, 0.9, 0.3, 0.0, 0.5, 0.002],
-            [0.2, 0.4, 0.4, 0.3, 0.0, 0.1, 3.0, 0.0, 0.5, 0.03],
+            [0.005, 0.5, 0.5, 0.01, 0.0, 0.9, 0.3, 0.0, 0.5, 0.002, 0.0, 0.0, 0.0, 0.0],
+            [0.2, 0.4, 0.4, 0.3, 0.0, 0.1, 3.0, 0.0, 0.5, 0.03, 0.0, 0.0, 0.0, 0.0],
         ];
         let assignments = vec![0, 1];
         let summaries = compute_cluster_summaries(&features, &assignments);
@@ -2186,7 +2483,7 @@ mod tests {
 
     #[test]
     fn interpret_cluster_volatile_sparse_declining() {
-        let mean = [0.15, 0.05, 0.02, 0.1, -0.001, 0.1, 1.0, 0.0, 0.5, 0.01];
+        let mean = [0.15, 0.05, 0.02, 0.1, -0.001, 0.1, 1.0, 0.0, 0.5, 0.01, 0.0, 0.0, 0.0, 0.0];
         let interp = interpret_cluster(&mean);
         assert!(interp.contains("volatile"));
         assert!(interp.contains("sparse"));
@@ -2195,7 +2492,7 @@ mod tests {
 
     #[test]
     fn interpret_cluster_stable_dense_persistent() {
-        let mean = [0.005, 0.8, 0.8, 0.01, 0.0, 0.9, 0.3, 0.0, 0.5, 0.003];
+        let mean = [0.005, 0.8, 0.8, 0.01, 0.0, 0.9, 0.3, 0.0, 0.5, 0.003, 0.0, 0.0, 0.0, 0.0];
         let interp = interpret_cluster(&mean);
         assert!(interp.contains("stable"));
         assert!(interp.contains("dense"));
@@ -2205,14 +2502,14 @@ mod tests {
     #[test]
     fn interpret_cluster_mixed_dynamics() {
         // All values in mid-range → "mixed dynamics"
-        let mean = [0.05, 0.5, 0.5, 0.1, 0.0, 0.5, 1.5, 0.0, 0.5, 0.01];
+        let mean = [0.05, 0.5, 0.5, 0.1, 0.0, 0.5, 1.5, 0.0, 0.5, 0.01, 0.2, 0.05, 1.0, 0.05];
         let interp = interpret_cluster(&mean);
         assert_eq!(interp, "mixed dynamics");
     }
 
     #[test]
     fn interpret_cluster_periodic() {
-        let mean = [0.05, 0.5, 0.5, 0.1, 0.0, 0.5, 1.5, 5.0, 0.5, 0.01];
+        let mean = [0.05, 0.5, 0.5, 0.1, 0.0, 0.5, 1.5, 5.0, 0.5, 0.01, 0.0, 0.0, 0.0, 0.0];
         let interp = interpret_cluster(&mean);
         assert!(interp.contains("periodic"));
     }
@@ -2253,6 +2550,10 @@ mod tests {
                         dominant_period: 0,
                         monotonic_fraction: 0.6,
                         roughness: 0.01,
+                        langton_lambda: 0.0,
+                        activity: 0.0,
+                        spatial_entropy: 0.0,
+                        damage_spreading: 0.0,
                     },
                     behavior: BehaviorClass::Complex,
                     cluster: None,
@@ -2370,5 +2671,140 @@ mod tests {
 
         let _ = fs::remove_file(&results_path);
         let _ = fs::remove_file(&examined_path);
+    }
+
+    // ── Langton's λ ──
+
+    #[test]
+    fn langton_lambda_conway() {
+        let rules = Rules::conway();
+        let lambda = langton_lambda(&rules);
+        // Conway B3/S23: 3 entries out of 18 total → λ = 3/18 ≈ 0.167
+        assert!((lambda - 3.0 / 18.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn langton_lambda_seeds() {
+        let rules = Rules::seeds();
+        let lambda = langton_lambda(&rules);
+        // Seeds B2/S: 1 birth entry, 0 survival entries out of 18 → λ = 1/18
+        assert!((lambda - 1.0 / 18.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn langton_lambda_all_alive() {
+        // All bits set: everything maps to alive.
+        let rules = Rules {
+            birth: 0x1FF,     // bits 0..=8
+            survival: 0x1FF,
+            radius: 1,
+        };
+        let lambda = langton_lambda(&rules);
+        assert!((lambda - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn langton_lambda_all_dead() {
+        let rules = Rules {
+            birth: 0,
+            survival: 0,
+            radius: 1,
+        };
+        let lambda = langton_lambda(&rules);
+        assert!((lambda - 0.0).abs() < 1e-10);
+    }
+
+    // ── Activity ──
+
+    #[test]
+    fn activity_no_changes() {
+        let counts: Vec<u64> = vec![0; 50];
+        assert_eq!(compute_activity(&counts, 100), 0.0);
+    }
+
+    #[test]
+    fn activity_all_change() {
+        let counts: Vec<u64> = vec![100; 50];
+        assert!((compute_activity(&counts, 100) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn activity_half_change() {
+        let counts: Vec<u64> = vec![50; 50];
+        assert!((compute_activity(&counts, 100) - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn activity_empty_counts() {
+        assert_eq!(compute_activity(&[], 100), 0.0);
+    }
+
+    // ── Spatial entropy ──
+
+    #[test]
+    fn spatial_entropy_uniform_zero() {
+        // All dead → only one block pattern → entropy = 0
+        let cells = vec![0u32; 100];
+        assert_eq!(compute_spatial_entropy(&cells, 10, 10), 0.0);
+    }
+
+    #[test]
+    fn spatial_entropy_uniform_alive() {
+        // All alive → only one block pattern → entropy = 0
+        let cells = vec![1u32; 100];
+        assert_eq!(compute_spatial_entropy(&cells, 10, 10), 0.0);
+    }
+
+    #[test]
+    fn spatial_entropy_checkerboard_positive() {
+        // Checkerboard has a mix of patterns → positive entropy
+        let mut cells = vec![0u32; 100];
+        for y in 0..10 {
+            for x in 0..10 {
+                cells[y * 10 + x] = ((x + y) % 2) as u32;
+            }
+        }
+        let e = compute_spatial_entropy(&cells, 10, 10);
+        assert!(e > 0.0, "Checkerboard should have positive spatial entropy, got {e}");
+    }
+
+    #[test]
+    fn spatial_entropy_small_grid() {
+        assert_eq!(compute_spatial_entropy(&[1], 1, 1), 0.0);
+    }
+
+    // ── Damage spreading ──
+
+    #[test]
+    fn damage_spreading_dead_rule() {
+        // Rule with no birth and no survival → everything dies → no spreading.
+        let rules = Rules {
+            birth: 0,
+            survival: 0,
+            radius: 1,
+        };
+        let cells = vec![0u32; 64];
+        let ds = compute_damage_spreading(&cells, 8, 8, &rules);
+        assert!(ds < 1e-10, "Dead rule should have zero damage spreading");
+    }
+
+    #[test]
+    fn damage_spreading_empty_grid() {
+        let rules = Rules::conway();
+        let ds = compute_damage_spreading(&[], 0, 0, &rules);
+        assert_eq!(ds, 0.0);
+    }
+
+    #[test]
+    fn damage_spreading_bounded() {
+        // Damage spreading should always be between 0 and 1.
+        let rules = Rules::conway();
+        let mut cells = vec![0u32; 256];
+        // Set some initial cells alive
+        for i in (0..256).step_by(3) {
+            cells[i] = 1;
+        }
+        let ds = compute_damage_spreading(&cells, 16, 16, &rules);
+        assert!(ds >= 0.0 && ds <= 1.0, "Damage spreading out of range: {ds}");
     }
 }
