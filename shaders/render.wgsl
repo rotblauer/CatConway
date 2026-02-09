@@ -53,7 +53,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Outside grid bounds
     if (gx < 0 || gx >= i32(camera.grid_width) || gy < 0 || gy >= i32(camera.grid_height)) {
-        return vec4<f32>(0.03, 0.03, 0.08, 1.0);
+        return vec4<f32>(0.04, 0.04, 0.06, 1.0);
     }
 
     let cell_idx = u32(gy) * u32(camera.grid_width) + u32(gx);
@@ -61,15 +61,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     if (grid_line) {
         if (alive == 1u) {
-            return vec4<f32>(0.15, 0.7, 0.25, 1.0);
+            return vec4<f32>(0.55, 0.42, 0.22, 1.0);
         } else {
-            return vec4<f32>(0.06, 0.06, 0.12, 1.0);
+            return vec4<f32>(0.07, 0.07, 0.10, 1.0);
         }
     }
 
     if (alive == 1u) {
-        return vec4<f32>(0.2, 0.9, 0.3, 1.0);
+        return vec4<f32>(0.85, 0.65, 0.30, 1.0);
     } else {
-        return vec4<f32>(0.02, 0.02, 0.05, 1.0);
+        return vec4<f32>(0.03, 0.03, 0.05, 1.0);
     }
 }

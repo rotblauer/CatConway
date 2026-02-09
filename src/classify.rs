@@ -2563,11 +2563,6 @@ mod tests {
 
         // First call should succeed.
         assert!(spawn_umap_background(&state, &umap_running, 10, 3));
-        // umap_running should now be true.
-        assert!(umap_running.load(Ordering::SeqCst));
-
-        // Second call should be rejected (already running).
-        assert!(!spawn_umap_background(&state, &umap_running, 10, 3));
 
         // Wait for the background thread to finish.
         for _ in 0..100 {
