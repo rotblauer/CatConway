@@ -97,7 +97,7 @@ canvas#c{display:block;width:100%;height:100%;image-rendering:pixelated}
   </div>
 </header>
 
-<div id="main-area">
+<main id="main-area">
 <div id="canvas-wrap">
   <canvas id="c"></canvas>
   <div id="rule-display"></div>
@@ -124,7 +124,7 @@ canvas#c{display:block;width:100%;height:100%;image-rendering:pixelated}
     <div class="stat-item wide"><div class="label">Volatility</div><div class="value" id="stat-volatility">—</div></div>
   </div>
 </div>
-</div>
+</main>
 
 <script>
 "use strict";
@@ -626,6 +626,7 @@ function classifyBehavior(){
     }
   }
 
+  // Classification thresholds (coefficient of variation %)
   if(population === 0){
     el.textContent = '💀 Extinct';
     el.style.color = 'var(--danger)';
