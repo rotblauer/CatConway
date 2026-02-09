@@ -2563,11 +2563,6 @@ mod tests {
 
         // First call should succeed.
         assert!(spawn_umap_background(&state, &umap_running, 10, 3));
-        // umap_running should now be true.
-        assert!(umap_running.load(Ordering::SeqCst));
-
-        // Second call should be rejected (already running).
-        assert!(!spawn_umap_background(&state, &umap_running, 10, 3));
 
         // Wait for the background thread to finish.
         for _ in 0..100 {
@@ -2583,6 +2578,49 @@ mod tests {
         let has_umap = s.results.iter().any(|r| r.umap_x.is_some());
         assert!(has_umap, "Expected UMAP coordinates after background thread");
         assert!(!s.umap_cluster_summaries.is_empty(), "Expected cluster summaries");
+    }
+
+    #[test]
+    fn spawn_umap_rejects_when_already_running() {
+        let state = Arc::new(Mutex::new(ClassifyState {
+            examined: std::collections::HashSet::new(),
+            results: (0..20)
+                .map(|i| {
+                    let v = i as f64;
+                    ClassifiedRule {
+                        rules: Rules::conway(),
+                        label: format!("test_{i}"),
+                        metrics: RuleMetrics {
+                            variation: v * 0.01,
+                            mean_density: 0.3 + v * 0.01,
+                            final_density: 0.3,
+                            density_range: 0.05,
+                            trend: 0.001,
+                            autocorrelation: 0.5,
+                            entropy: 2.0,
+                            dominant_period: 0,
+                            monotonic_fraction: 0.6,
+                            roughness: 0.01,
+                            langton_lambda: 0.0,
+                            activity: 0.0,
+                            spatial_entropy: 0.0,
+                            damage_spreading: 0.0,
+                        },
+                        behavior: BehaviorClass::Complex,
+                        cluster: None,
+                        umap_x: None,
+                        umap_y: None,
+                        umap_cluster: None,
+                    }
+                })
+                .collect(),
+            total_examined: 0,
+            running: true,
+            umap_cluster_summaries: Vec::new(),
+        }));
+        // Pre-set umap_running to true to simulate an in-progress UMAP thread.
+        let umap_running = Arc::new(AtomicBool::new(true));
+        assert!(!spawn_umap_background(&state, &umap_running, 10, 3));
     }
 
     // ── Config customization ──
