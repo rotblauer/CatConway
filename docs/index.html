@@ -169,15 +169,14 @@ let popHistory = [];
 let peakPop = 0;
 let minPop  = Infinity;
 
-function getMinZoom(){
+function calcMinZoom(){
   const w = canvas.width || 1;
   const h = canvas.height || 1;
-  const aspect = Math.max(w, h) / Math.min(w, h);
-  return aspect;
+  return Math.max(w, h) / Math.min(w, h);
 }
 
 function clampZoom(z){
-  return Math.max(getMinZoom(), Math.min(z, 50));
+  return Math.max(calcMinZoom(), Math.min(z, 50));
 }
 
 // ── WebGL2 Setup ──────────────────────────────────────────────────
@@ -496,7 +495,7 @@ function drawChart(){
   chartCtx.lineWidth = 1.5 * dpr;
   chartCtx.beginPath();
   for(let i = 0; i < popHistory.length; i++){
-    const x = (i / (popHistory.length - 1)) * plotW;
+    const x = (i / Math.max(popHistory.length - 1, 1)) * plotW;
     const y = plotH - (popHistory[i] / maxVal) * plotH;
     if(i === 0) chartCtx.moveTo(x, y); else chartCtx.lineTo(x, y);
   }
@@ -507,7 +506,7 @@ function drawChart(){
   chartCtx.lineWidth = 1 * dpr;
   chartCtx.beginPath();
   for(let i = 0; i < popHistory.length; i++){
-    const x = (i / (popHistory.length - 1)) * plotW;
+    const x = (i / Math.max(popHistory.length - 1, 1)) * plotW;
     const dead = totalCells - popHistory[i];
     const y = plotH - (dead / maxVal) * plotH;
     if(i === 0) chartCtx.moveTo(x, y); else chartCtx.lineTo(x, y);
@@ -607,7 +606,7 @@ function mainLoop(now){
   if(generation % 10 === 0) countPopulation();
 
   // record population history every 10 generations
-  if(popHistory.length === 0 || (generation > 0 && generation % 10 === 0 && (popHistory.length === 0 || popHistory._lastGen !== generation))){
+  if(popHistory.length === 0 || (generation > 0 && generation % 10 === 0 && popHistory._lastGen !== generation)){
     popHistory.push(population);
     popHistory._lastGen = generation;
     if(popHistory.length > MAX_HISTORY) popHistory.shift();

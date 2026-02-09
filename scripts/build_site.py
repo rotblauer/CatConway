@@ -84,12 +84,18 @@ def rule_to_js(rule, is_favorite=False):
 
 
 def build_rules_array(favorites, builtins):
-    """Build the complete JS RULES array source using only favorites."""
+    """Build the complete JS RULES array source using only favorites.
+
+    If no favorites are found, falls back to builtins so the app always
+    has at least one rule available (RULES[0] is referenced at startup).
+    """
+    rules = favorites if favorites else builtins
+    is_fav = bool(favorites)
     lines = ["const RULES = ["]
-    if favorites:
-        lines.append("  // Favorites from favorites.txt")
-        for r in favorites:
-            lines.append(rule_to_js(r, is_favorite=True) + ",")
+    label = "Favorites from favorites.txt" if is_fav else "Built-in classic rules (no favorites found)"
+    lines.append(f"  // {label}")
+    for r in rules:
+        lines.append(rule_to_js(r, is_favorite=is_fav) + ",")
     lines.append("];")
     return "\n".join(lines)
 
@@ -260,15 +266,14 @@ let popHistory = [];
 let peakPop = 0;
 let minPop  = Infinity;
 
-function getMinZoom(){
+function calcMinZoom(){
   const w = canvas.width || 1;
   const h = canvas.height || 1;
-  const aspect = Math.max(w, h) / Math.min(w, h);
-  return aspect;
+  return Math.max(w, h) / Math.min(w, h);
 }
 
 function clampZoom(z){
-  return Math.max(getMinZoom(), Math.min(z, 50));
+  return Math.max(calcMinZoom(), Math.min(z, 50));
 }
 
 // ── WebGL2 Setup ──────────────────────────────────────────────────
@@ -587,7 +592,7 @@ function drawChart(){
   chartCtx.lineWidth = 1.5 * dpr;
   chartCtx.beginPath();
   for(let i = 0; i < popHistory.length; i++){
-    const x = (i / (popHistory.length - 1)) * plotW;
+    const x = (i / Math.max(popHistory.length - 1, 1)) * plotW;
     const y = plotH - (popHistory[i] / maxVal) * plotH;
     if(i === 0) chartCtx.moveTo(x, y); else chartCtx.lineTo(x, y);
   }
@@ -598,7 +603,7 @@ function drawChart(){
   chartCtx.lineWidth = 1 * dpr;
   chartCtx.beginPath();
   for(let i = 0; i < popHistory.length; i++){
-    const x = (i / (popHistory.length - 1)) * plotW;
+    const x = (i / Math.max(popHistory.length - 1, 1)) * plotW;
     const dead = totalCells - popHistory[i];
     const y = plotH - (dead / maxVal) * plotH;
     if(i === 0) chartCtx.moveTo(x, y); else chartCtx.lineTo(x, y);
@@ -698,7 +703,7 @@ function mainLoop(now){
   if(generation % 10 === 0) countPopulation();
 
   // record population history every 10 generations
-  if(popHistory.length === 0 || (generation > 0 && generation % 10 === 0 && (popHistory.length === 0 || popHistory._lastGen !== generation))){
+  if(popHistory.length === 0 || (generation > 0 && generation % 10 === 0 && popHistory._lastGen !== generation)){
     popHistory.push(population);
     popHistory._lastGen = generation;
     if(popHistory.length > MAX_HISTORY) popHistory.shift();
