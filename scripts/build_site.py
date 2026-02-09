@@ -84,20 +84,18 @@ def rule_to_js(rule, is_favorite=False):
 
 
 def build_rules_array(favorites, builtins):
-    """Build the complete JS RULES array source."""
+    """Build the complete JS RULES array source using only favorites."""
     lines = ["const RULES = ["]
     if favorites:
         lines.append("  // Favorites from favorites.txt")
         for r in favorites:
             lines.append(rule_to_js(r, is_favorite=True) + ",")
-    lines.append("  // Classic rules")
-    for r in builtins:
-        lines.append(rule_to_js(r) + ",")
     lines.append("];")
     return "\n".join(lines)
 
 
 # ── HTML template ──────────────────────────────────────────────────────────
+
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -107,7 +105,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <title>CatConway — Cellular Automata Explorer</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#111;--panel:#1a1a2e;--accent:#0f3460;--highlight:#e94560;--text:#eee;--muted:#888;--border:#333}
+:root{--bg:#0a0a0f;--panel:#12121c;--accent:#1e293b;--highlight:#f59e0b;--highlight2:#fb923c;--text:#e2e8f0;--muted:#94a3b8;--border:#334155;--live:#22d3ee;--dead:#475569}
 body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden;height:100vh;display:flex;flex-direction:column}
 header{background:var(--panel);padding:8px 16px;display:flex;align-items:center;gap:16px;border-bottom:1px solid var(--border);flex-wrap:wrap;z-index:10}
 header h1{font-size:1.1rem;font-weight:700;white-space:nowrap}
@@ -118,15 +116,29 @@ select,button,input[type=range]{font-size:.8rem;background:var(--accent);color:v
 select{max-width:220px}
 input[type=text]{font-size:.8rem;background:var(--accent);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;outline:none;font-family:monospace;width:160px}
 input[type=text]:focus{border-color:var(--highlight)}
-input[type=text].invalid{border-color:#c0392b;background:#2c1a1a}
-button:hover{background:var(--highlight)}
-button.active{background:var(--highlight)}
+input[type=text].invalid{border-color:#dc2626;background:#1c1117}
+button:hover{background:var(--highlight);color:#0a0a0f}
+button.active{background:var(--highlight);color:#0a0a0f}
 input[type=range]{width:80px;padding:0;vertical-align:middle}
 .sep{width:1px;height:20px;background:var(--border);margin:0 4px}
+#main-area{flex:1;display:flex;overflow:hidden}
 #canvas-wrap{flex:1;position:relative;overflow:hidden}
-canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
+canvas#c{display:block;width:100%;height:100%;image-rendering:pixelated}
 #info{position:absolute;bottom:8px;left:8px;font-size:.7rem;color:var(--muted);pointer-events:none;background:rgba(0,0,0,.6);padding:4px 8px;border-radius:4px}
 #rule-display{position:absolute;top:8px;right:8px;font-size:.85rem;color:var(--highlight);background:rgba(0,0,0,.7);padding:6px 12px;border-radius:4px;font-family:monospace;pointer-events:none}
+#side-panel{width:280px;background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;padding:12px;gap:12px;flex-shrink:0}
+#side-panel h2{font-size:.85rem;color:var(--highlight);margin:0;text-transform:uppercase;letter-spacing:.05em}
+#side-panel .stat-row{display:flex;justify-content:space-between;font-size:.75rem;padding:2px 0}
+#side-panel .stat-row .stat-label{color:var(--muted)}
+#side-panel .stat-row .stat-value{color:var(--text);font-family:monospace;font-weight:600}
+#pop-chart{width:100%;height:140px;background:var(--bg);border:1px solid var(--border);border-radius:4px}
+#side-panel .section{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px}
+#side-panel .section h2{margin-bottom:8px}
+.behavior-tag{display:inline-block;font-size:.65rem;padding:2px 6px;border-radius:3px;font-weight:700;text-transform:uppercase}
+.behavior-tag.periodic{background:#164e63;color:#22d3ee}
+.behavior-tag.chaotic{background:#78350f;color:#fbbf24}
+.behavior-tag.stable{background:#14532d;color:#4ade80}
+.behavior-tag.dying{background:#44403c;color:#a8a29e}
 .tooltip{position:relative}
 .tooltip::after{content:attr(data-tip);position:absolute;bottom:110%;left:50%;transform:translateX(-50%);background:#222;color:#ccc;font-size:.65rem;padding:3px 7px;border-radius:3px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s}
 .tooltip:hover::after{opacity:1}
@@ -188,10 +200,29 @@ canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
   </div>
 </header>
 
+<div id="main-area">
 <div id="canvas-wrap">
   <canvas id="c"></canvas>
   <div id="rule-display"></div>
   <div id="info"></div>
+</div>
+<div id="side-panel">
+  <div class="section">
+    <h2>📊 Population</h2>
+    <canvas id="pop-chart"></canvas>
+  </div>
+  <div class="section" id="stats-section">
+    <h2>📈 Stats</h2>
+    <div class="stat-row"><span class="stat-label">Generation</span><span class="stat-value" id="stat-gen">0</span></div>
+    <div class="stat-row"><span class="stat-label">Live Cells</span><span class="stat-value" id="stat-live">0</span></div>
+    <div class="stat-row"><span class="stat-label">Dead Cells</span><span class="stat-value" id="stat-dead">0</span></div>
+    <div class="stat-row"><span class="stat-label">Density</span><span class="stat-value" id="stat-density">0%</span></div>
+    <div class="stat-row"><span class="stat-label">ΔPop / step</span><span class="stat-value" id="stat-delta">0</span></div>
+    <div class="stat-row"><span class="stat-label">Peak Pop</span><span class="stat-value" id="stat-peak">0</span></div>
+    <div class="stat-row"><span class="stat-label">Min Pop</span><span class="stat-value" id="stat-min">0</span></div>
+    <div class="stat-row"><span class="stat-label">Behavior</span><span class="stat-value" id="stat-behavior"><span class="behavior-tag stable">—</span></span></div>
+  </div>
+</div>
 </div>
 
 <script>
@@ -222,6 +253,23 @@ let generation = 0;
 let population = 0;
 let curRule    = RULES[0];
 let camera     = {x:0, y:0, zoom:1};
+
+// ── Population History ────────────────────────────────────────────
+const MAX_HISTORY = 300;
+let popHistory = [];
+let peakPop = 0;
+let minPop  = Infinity;
+
+function getMinZoom(){
+  const w = canvas.width || 1;
+  const h = canvas.height || 1;
+  const aspect = Math.max(w, h) / Math.min(w, h);
+  return aspect;
+}
+
+function clampZoom(z){
+  return Math.max(getMinZoom(), Math.min(z, 50));
+}
 
 // ── WebGL2 Setup ──────────────────────────────────────────────────
 const canvas = document.getElementById('c');
@@ -293,8 +341,8 @@ void main(){
   gridUV = fract(gridUV);
   float cell = texture(u_state, gridUV).r;
 
-  vec3 alive_color = vec3(0.35, 0.95, 0.55);
-  vec3 dead_color  = vec3(0.06, 0.06, 0.1);
+  vec3 alive_color = vec3(0.13, 0.83, 0.93);
+  vec3 dead_color  = vec3(0.04, 0.04, 0.06);
   vec3 col = mix(dead_color, alive_color, cell);
 
   vec2 gridCoord = gridUV * u_gridSize;
@@ -495,8 +543,135 @@ function countPopulation(){
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
+// ── Population Chart ──────────────────────────────────────────────
+const chartCanvas = document.getElementById('pop-chart');
+const chartCtx = chartCanvas.getContext('2d');
+
+function drawChart(){
+  const dpr = window.devicePixelRatio || 1;
+  const rect = chartCanvas.getBoundingClientRect();
+  const w = Math.round(rect.width * dpr);
+  const h = Math.round(rect.height * dpr);
+  if(chartCanvas.width !== w || chartCanvas.height !== h){
+    chartCanvas.width = w;
+    chartCanvas.height = h;
+  }
+  chartCtx.clearRect(0, 0, w, h);
+  if(popHistory.length < 2) return;
+
+  const pad = {top:8*dpr, right:4*dpr, bottom:16*dpr, left:4*dpr};
+  const plotW = w - pad.left - pad.right;
+  const plotH = h - pad.top - pad.bottom;
+  const totalCells = gridSize * gridSize;
+
+  let maxVal = 0;
+  for(const p of popHistory) maxVal = Math.max(maxVal, p);
+  maxVal = Math.max(maxVal, 1);
+
+  chartCtx.save();
+  chartCtx.translate(pad.left, pad.top);
+
+  // grid lines
+  chartCtx.strokeStyle = '#1e293b';
+  chartCtx.lineWidth = dpr;
+  for(let i = 0; i <= 4; i++){
+    const y = plotH - (i / 4) * plotH;
+    chartCtx.beginPath();
+    chartCtx.moveTo(0, y);
+    chartCtx.lineTo(plotW, y);
+    chartCtx.stroke();
+  }
+
+  // live cells line
+  chartCtx.strokeStyle = '#22d3ee';
+  chartCtx.lineWidth = 1.5 * dpr;
+  chartCtx.beginPath();
+  for(let i = 0; i < popHistory.length; i++){
+    const x = (i / (popHistory.length - 1)) * plotW;
+    const y = plotH - (popHistory[i] / maxVal) * plotH;
+    if(i === 0) chartCtx.moveTo(x, y); else chartCtx.lineTo(x, y);
+  }
+  chartCtx.stroke();
+
+  // dead cells line
+  chartCtx.strokeStyle = '#475569';
+  chartCtx.lineWidth = 1 * dpr;
+  chartCtx.beginPath();
+  for(let i = 0; i < popHistory.length; i++){
+    const x = (i / (popHistory.length - 1)) * plotW;
+    const dead = totalCells - popHistory[i];
+    const y = plotH - (dead / maxVal) * plotH;
+    if(i === 0) chartCtx.moveTo(x, y); else chartCtx.lineTo(x, y);
+  }
+  chartCtx.stroke();
+
+  chartCtx.restore();
+
+  // axis labels
+  chartCtx.fillStyle = '#94a3b8';
+  chartCtx.font = `${9*dpr}px monospace`;
+  chartCtx.textAlign = 'left';
+  chartCtx.fillText('live', pad.left + 2*dpr, pad.top + 10*dpr);
+  chartCtx.fillStyle = '#475569';
+  chartCtx.fillText('dead', pad.left + 32*dpr, pad.top + 10*dpr);
+}
+
+// ── Behavior Detection ────────────────────────────────────────────
+function detectBehavior(){
+  if(popHistory.length < 20) return {tag:'stable', label:'—'};
+  const recent = popHistory.slice(-60);
+  const last = recent[recent.length - 1];
+
+  if(last === 0) return {tag:'dying', label:'Extinct'};
+
+  // check for strict periodicity (last N values repeat)
+  for(let period = 1; period <= 16; period++){
+    if(recent.length < period * 3) continue;
+    let match = true;
+    for(let i = 0; i < period * 2 && i < recent.length - period; i++){
+      if(recent[recent.length - 1 - i] !== recent[recent.length - 1 - i - period]){
+        match = false;
+        break;
+      }
+    }
+    if(match){
+      if(period === 1) return {tag:'stable', label:'Stable'};
+      return {tag:'periodic', label:`Period ${period}`};
+    }
+  }
+
+  // check variance for chaotic vs stable
+  const mean = recent.reduce((a,b)=>a+b,0) / recent.length;
+  const variance = recent.reduce((a,b)=>a + (b-mean)**2, 0) / recent.length;
+  const cv = Math.sqrt(variance) / (mean || 1);
+  if(cv < 0.01) return {tag:'stable', label:'Stable'};
+  if(cv < 0.05) return {tag:'periodic', label:'Oscillating'};
+  return {tag:'chaotic', label:'Chaotic'};
+}
+
+// ── Side Panel Update ─────────────────────────────────────────────
+function updateSidePanel(){
+  const totalCells = gridSize * gridSize;
+  const dead = totalCells - population;
+  const density = (population / totalCells * 100).toFixed(1);
+  const delta = popHistory.length >= 2 ? popHistory[popHistory.length-1] - popHistory[popHistory.length-2] : 0;
+
+  document.getElementById('stat-gen').textContent = generation.toLocaleString();
+  document.getElementById('stat-live').textContent = '~' + population.toLocaleString();
+  document.getElementById('stat-dead').textContent = '~' + dead.toLocaleString();
+  document.getElementById('stat-density').textContent = density + '%';
+  document.getElementById('stat-delta').textContent = (delta >= 0 ? '+' : '') + delta.toLocaleString();
+  document.getElementById('stat-peak').textContent = '~' + peakPop.toLocaleString();
+  document.getElementById('stat-min').textContent = minPop === Infinity ? '—' : '~' + minPop.toLocaleString();
+
+  const beh = detectBehavior();
+  const behEl = document.getElementById('stat-behavior');
+  behEl.innerHTML = `<span class="behavior-tag ${beh.tag}">${beh.label}</span>`;
+}
+
 // ── Main Loop ─────────────────────────────────────────────────────
 let lastStep = 0;
+let lastPanelUpdate = 0;
 function mainLoop(now){
   requestAnimationFrame(mainLoop);
 
@@ -507,6 +682,7 @@ function mainLoop(now){
   if(canvas.width !== cw || canvas.height !== ch){
     canvas.width  = cw;
     canvas.height = ch;
+    camera.zoom = clampZoom(camera.zoom);
   }
 
   if(playing){
@@ -520,6 +696,23 @@ function mainLoop(now){
   render();
 
   if(generation % 10 === 0) countPopulation();
+
+  // record population history every 10 generations
+  if(popHistory.length === 0 || (generation > 0 && generation % 10 === 0 && (popHistory.length === 0 || popHistory._lastGen !== generation))){
+    popHistory.push(population);
+    popHistory._lastGen = generation;
+    if(popHistory.length > MAX_HISTORY) popHistory.shift();
+    if(population > peakPop) peakPop = population;
+    if(population < minPop) minPop = population;
+  }
+
+  // update side panel at ~4 Hz
+  if(now - lastPanelUpdate > 250){
+    updateSidePanel();
+    drawChart();
+    lastPanelUpdate = now;
+  }
+
   const info = document.getElementById('info');
   info.textContent = `Gen: ${generation} | Pop: ~${population.toLocaleString()} | Grid: ${gridSize}\u00d7${gridSize} | Zoom: ${camera.zoom.toFixed(1)}x`;
 }
@@ -625,6 +818,10 @@ function updateRuleDisplay(){
 function resetSim(keepState){
   generation = 0;
   population = 0;
+  popHistory = [];
+  popHistory._lastGen = -1;
+  peakPop = 0;
+  minPop = Infinity;
   if(!keepState){
     const data = randomGrid();
     initBuffers(gridSize, data);
@@ -667,6 +864,10 @@ document.getElementById('btn-step').addEventListener('click', () => {
 document.getElementById('btn-clear').addEventListener('click', () => {
   generation = 0;
   population = 0;
+  popHistory = [];
+  popHistory._lastGen = -1;
+  peakPop = 0;
+  minPop = Infinity;
   initBuffers(gridSize, clearGrid());
 });
 
@@ -725,7 +926,7 @@ canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const factor = e.deltaY < 0 ? 1.15 : 1/1.15;
-  camera.zoom = Math.max(0.25, Math.min(camera.zoom * factor, 50));
+  camera.zoom = clampZoom(camera.zoom * factor);
 }, {passive:false});
 
 // ── Keyboard Shortcuts ────────────────────────────────────────────
@@ -746,13 +947,13 @@ document.addEventListener('keydown', (e) => {
       document.getElementById('btn-random').click();
       break;
     case 'Equal': case 'NumpadAdd':
-      camera.zoom = Math.min(camera.zoom * 1.2, 50);
+      camera.zoom = clampZoom(camera.zoom * 1.2);
       break;
     case 'Minus': case 'NumpadSubtract':
-      camera.zoom = Math.max(camera.zoom / 1.2, 0.25);
+      camera.zoom = clampZoom(camera.zoom / 1.2);
       break;
     case 'Home':
-      camera = {x:0, y:0, zoom:1};
+      camera = {x:0, y:0, zoom:clampZoom(1)};
       break;
   }
 });
@@ -793,7 +994,7 @@ canvas.addEventListener('touchmove', (e) => {
     const cur = Array.from(e.touches);
     const prevDist = Math.hypot(lastTouches[1].clientX - lastTouches[0].clientX, lastTouches[1].clientY - lastTouches[0].clientY);
     const curDist  = Math.hypot(cur[1].clientX - cur[0].clientX, cur[1].clientY - cur[0].clientY);
-    if(prevDist > 0) camera.zoom = Math.max(0.25, Math.min(camera.zoom * (curDist / prevDist), 50));
+    if(prevDist > 0) camera.zoom = clampZoom(camera.zoom * (curDist / prevDist));
     const prevMid = {x:(lastTouches[0].clientX+lastTouches[1].clientX)/2, y:(lastTouches[0].clientY+lastTouches[1].clientY)/2};
     const curMid  = {x:(cur[0].clientX+cur[1].clientX)/2, y:(cur[0].clientY+cur[1].clientY)/2};
     const dpr = window.devicePixelRatio || 1;
@@ -807,6 +1008,7 @@ canvas.addEventListener('touchmove', (e) => {
 canvas.addEventListener('touchend', () => { drawing = false; lastTouches = []; });
 
 // ── Init ──────────────────────────────────────────────────────────
+camera.zoom = clampZoom(1);
 resetSim(false);
 updateRuleDisplay();
 requestAnimationFrame(mainLoop);
